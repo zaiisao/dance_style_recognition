@@ -237,7 +237,7 @@ def verify_lma_integrity(npy_path):
     print(f"    Saved plot to {output_img}")
 
 def main():
-    video_path = "/home/sogang/mnt/db_1/jaehoon/nsfw_datasets/sfw/kinetics-dataset/k700-2020/train/cartwheeling/_Ar-OVgeCvA_000004_000014.mp4" # Replaces single image path
+    video_path = "/home/sogang/mnt/db_1/jaehoon/aist/gBR_sBM_c01_d04_mBR0_ch01.mp4"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     print("Loading Models...")
@@ -251,8 +251,6 @@ def main():
     DEBUG_DURATION = 3.0 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0: fps = 30.0
-    max_frames = int(fps * DEBUG_DURATION)
-    print(f"--- DEBUG MODE: Processing only {max_frames} frames ---")
 
     all_joints = []
     all_volumes = []
@@ -262,7 +260,7 @@ def main():
 
     last_valid_volume = 0.0
 
-    should_use_debug_data = True
+    should_use_debug_data = False
     if should_use_debug_data:
         data = np.load("debug_data.npz", allow_pickle=True)
         all_joints = data['joints']
@@ -288,23 +286,25 @@ def main():
         slope, intercept = floor_params[0] # Get frame 0
         floor_model = recreate_floor_model(slope, intercept)
     else:
-        with tqdm(total=min(total_frames, max_frames), desc="Processing Frames", unit="frame") as pbar:
+        current_floor_model = None
+        with tqdm(total=total_frames, desc="Processing Frames", unit="frame") as pbar:
+            frame_idx = 0
             while cap.isOpened():
-                if len(all_joints) >= max_frames:
-                    print(f"Reached limit of {max_frames} frames.")
-                    break
-
                 ret, frame = cap.read()
                 if not ret:
                     break
                 
-                # 1. Floor Estimation
-                floor_model, _, current_scene_cloud = stage_b_floor_estimation(frame, moge_model, device=device)
-                all_floor_models.append(floor_model)
+                # --- STAGE B: Floor Estimation ---
+                if frame_idx == 0:
+                    current_floor_model, _, scene_cloud = stage_b_floor_estimation(frame, moge_model, device)
 
-                scene_cloud = current_scene_cloud
+                # EDIT 2: SYNC FIX
+                # We MUST append to this list EVERY frame, even if the model didn't update.
+                # This ensures len(all_floor_models) == len(all_joints).
+                all_floor_models.append(current_floor_model)
 
-                # 2. Pose Estimation
+                # --- STAGE A: Pose Estimation (Every Frame) ---
+                # [cite: 77] NLF must run every frame to capture the dance.
                 joints3d, vertices3d = stage_a_nlf_implementation(frame, nlf_model, device=device)
                 
                 joints_np = None
@@ -346,30 +346,30 @@ def main():
 
                 # --- METRICS ---
                 if joints_np is not None:
-                    # FIX: Array is (24, 3), so [0] gives the full Pelvis vector (x,y,z)
                     pelvis_pos = joints_np[0] 
                     
                     # Predict Floor Y (Height) at Pelvis Z (Depth)
-                    floor_y = floor_model.predict(pelvis_pos[2].reshape(-1, 1))[0]
-                    height_above_floor = floor_y - pelvis_pos[1] # Y is Down
+                    floor_y = current_floor_model.predict(pelvis_pos[2].reshape(-1, 1))[0]
+                    height_above_floor = floor_y - pelvis_pos[1]
                     
                     pbar.set_postfix(h=f"{height_above_floor:.2f}m", vol=f"{current_vol:.3f}")
                 else:
                     pbar.set_postfix(status="No Det")
                 
+                frame_idx += 1
                 pbar.update(1)
                 
         cap.release()
         print("Video processing complete.")
 
-    verify_pipeline_integrity(all_joints, all_volumes, floor_model)
+    verify_pipeline_integrity(all_joints, all_volumes, current_floor_model)
 
     # 1. Initialize Extractor
-    extractor = LMAExtractor(window_size=10, fps=fps)
+    extractor = LMAExtractor(window_size=55, fps=fps)
     
     # 2. Extract Features
-    # This converts your raw (Frames, 24, 3) joints into (Frames, 55) LMA descriptors
-    lma_features = extractor.extract_all_features(all_joints, all_volumes)
+    # Pass 'all_floor_models' so the extractor can fix the camera shake/tilt.
+    lma_features = extractor.extract_all_features(all_joints, all_volumes, all_floor_models)
     
     print(f"[-] Feature Extraction Complete")
     print(f"    Input Frames:  {len(all_joints)}")
@@ -398,6 +398,7 @@ def main():
         all_vertices, 
         all_floor_models, 
         scene_cloud,
+        lma_features=lma_features,
         output_path="debug_short_clip.mp4"
     )
 

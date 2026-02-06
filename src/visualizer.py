@@ -12,7 +12,7 @@ SKELETON_PARENTS = [
     (17,19), (18,20), (19,21)
 ]
 
-def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_floor_models, scene_cloud, output_path="dashboard_output.mp4"):
+def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_floor_models, scene_cloud, lma_features=None, output_path="dashboard_output.mp4"):
     print(f"Generating Dashboard: {output_path}...")
     
     cap = cv2.VideoCapture(video_path)
@@ -24,7 +24,17 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
     out_size = (width * 2, height * 2)
     writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, out_size)
     
-    fig = plt.figure(figsize=(12, 12), dpi=80)
+    fig = plt.figure(figsize=(16, 10), dpi=80)
+    gs = fig.add_gridspec(2, 2)
+
+    # [NEW] Pre-calculate Global Limits for LMA charts
+    # This ensures the Y-axis doesn't jitter while the video plays.
+    lma_limits = {}
+    if lma_features is not None:
+        for key, val in lma_features.items():
+            vmin, vmax = np.min(val), np.max(val)
+            margin = (vmax - vmin) * 0.1 if vmax != vmin else 1.0
+            lma_limits[key] = (vmin - margin, vmax + margin)
     
     # Pre-calculate Grid X/Z
     gx = np.linspace(-3, 3, 20)
@@ -79,7 +89,7 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
             fig.clf()
             
             # === PANEL 2: SCENE & FLOOR ===
-            ax1 = fig.add_subplot(222, projection='3d')
+            ax1 = fig.add_subplot(gs[0, 1], projection='3d')
             ax1.set_title("Scene Reconstruction")
 
             if scene_cloud is not None:
@@ -100,7 +110,7 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
             ax1.set_axis_off()
 
             # === PANEL 3: BODY MESH ===
-            ax2 = fig.add_subplot(223, projection='3d')
+            ax2 = fig.add_subplot(gs[1, 0], projection='3d')
             ax2.set_title("Body Model (SMPL)")
             
             if verts is not None and len(verts) > 0:
@@ -115,24 +125,53 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
             ax2.set_xlim(-1, 1); ax2.set_ylim(0, 5); ax2.set_zlim(-floor_mean-1, -floor_mean+2)
             ax2.set_axis_off()
 
-            # === PANEL 4: PHYSICS CHECK ===
-            ax3 = fig.add_subplot(224, projection='3d')
-            ax3.set_title("Physics Check (Side View)")
-            
-            ax3.plot_wireframe(GX, GZ, -GY, color='lime', linewidth=1.0)
-            
-            if joints is not None and len(joints) > 0:
-                j_plot = np.array(joints)
-                if j_plot.ndim == 3: j_plot = j_plot[0]
+            # === PANEL 4 (Bottom Right): LMA LIVE CHARTS ===
+            if lma_features is not None:
+                # Create a nested 4-row grid inside the bottom-right slot
+                gs_lma = gs[1, 1].subgridspec(4, 1, hspace=0.1)
+                
+                plots = [
+                    ('weight', 'Weight (Energy)', 'red'),
+                    ('time', 'Time (Suddenness)', 'blue'),
+                    ('flow', 'Flow (Control)', 'green'),
+                    ('space', 'Space (Directness)', 'purple')
+                ]
+                
+                # Sliding window logic (Show last 60 frames)
+                window_size = 60 
+                start_idx = max(0, frame_idx - window_size)
+                end_idx = frame_idx + 1
+                
+                for i, (key, label, color) in enumerate(plots):
+                    ax_lma = fig.add_subplot(gs_lma[i, 0])
+                    data = lma_features.get(key, np.zeros(total_frames))
+                    
+                    # 1. Plot History Line
+                    ax_lma.plot(np.arange(start_idx, end_idx), data[start_idx:end_idx], 
+                                color=color, linewidth=2)
+                    
+                    # 2. Plot Current Frame Dot
+                    if frame_idx < len(data):
+                        ax_lma.scatter(frame_idx, data[frame_idx], color='black', s=20, zorder=5)
 
-                xs, ys, zs = j_plot[:,0], j_plot[:,1], j_plot[:,2]
-                ax3.scatter(xs, zs, -ys, c='red', s=30)
-                for p1, p2 in SKELETON_PARENTS:
-                     ax3.plot([xs[p1], xs[p2]], [zs[p1], zs[p2]], [-ys[p1], -ys[p2]], c='blue', linewidth=2)
-
-            ax3.view_init(elev=0, azim=90) 
-            ax3.set_xlim(-2, 2); ax3.set_ylim(0, 5); ax3.set_zlim(-floor_mean-0.5, -floor_mean+2.0)
-            ax3.set_yticks([]) 
+                    # 3. Styling
+                    ax_lma.set_xlim(start_idx, start_idx + window_size)
+                    if key in lma_limits:
+                        ax_lma.set_ylim(lma_limits[key])
+                        
+                    ax_lma.set_ylabel(key.capitalize(), fontsize=8, rotation=0, labelpad=20)
+                    ax_lma.set_facecolor('#f8f9fa')
+                    ax_lma.grid(True, alpha=0.3)
+                    
+                    # Hide X-axis labels for the top 3 charts
+                    if i < 3:
+                        ax_lma.tick_params(axis='x', bottom=False, labelbottom=False)
+                    else:
+                        ax_lma.set_xlabel("Frame Window", fontsize=8)
+            else:
+                # Fallback if no features provided
+                ax3 = fig.add_subplot(gs[1, 1])
+                ax3.text(0.5, 0.5, "No LMA Data", ha='center')
 
             # Render
             fig.canvas.draw()
@@ -153,4 +192,3 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
     writer.release()
     plt.close()
     print(f"Dashboard saved to {output_path}")
-    
