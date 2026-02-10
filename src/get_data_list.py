@@ -1,4 +1,5 @@
 import os
+import argparse
 from collections import defaultdict
 
 # 1. Criteria from Section 3.1 of the paper
@@ -18,22 +19,16 @@ def filter_aist_videos(all_files):
         
         genre, situation, camera = parts[0], parts[1], parts[2]
         
-        # Apply strict filename filters
         if (genre in TARGET_GENRES and 
             situation in TARGET_SITUATIONS and 
             camera == TARGET_CAMERA):
-            
-            # Additional 'Standing' logic: In AIST++, 'sBM' (Basic) is 
-            # more likely to be standing than 'sFM' or choreographed work.
-            # We prioritize sBM to match the "standing dancers only" rule.
             genre_map[genre].append(filename)
 
     original_count = sum(len(v) for v in genre_map.values())
-    print(f"Original filtered count before limiting per genre: {original_count}")
+    print(f"Total valid candidates found: {original_count}")
 
     final_600_list = []
     for g in TARGET_GENRES:
-        # Take the first 60 available for that genre
         subset = genre_map[g][:TARGET_PER_GENRE]
         final_600_list.extend(subset)
         
@@ -42,12 +37,29 @@ def filter_aist_videos(all_files):
 
     return final_600_list
 
+def main():
+    # Set up argparse
+    parser = argparse.ArgumentParser(description="Filter AIST++ dataset videos based on specific criteria.")
+    parser.add_argument("--data_dir", type=str, required=True, help="Path to the directory containing AIST videos")
+    parser.add_argument("--output", type=str, default="aist_filtered_videos.txt", help="Name of the output text file")
+    
+    args = parser.parse_args()
 
-all_files = os.listdir('/home/sogang/mnt/db_1/jaehoon/aist')
-target_videos = filter_aist_videos(all_files)
-print(f"Found {len(target_videos)} videos matching the criteria.")
+    # Check if directory exists
+    if not os.path.isdir(args.data_dir):
+        print(f"Error: The directory '{args.data_dir}' does not exist.")
+        return
 
-# Save the filtered list to a text file
-with open('aist_filtered_videos.txt', 'w') as f:
-    for video in target_videos:
-        f.write(f"{video}\n")
+    # Process files
+    all_files = os.listdir(args.data_dir)
+    target_videos = filter_aist_videos(all_files)
+    
+    # Save the filtered list to a text file
+    with open(args.output, 'w') as f:
+        for video in target_videos:
+            f.write(f"{video}\n")
+            
+    print(f"Successfully saved {len(target_videos)} video filenames to {args.output}")
+
+if __name__ == "__main__":
+    main()
