@@ -11,8 +11,8 @@ from moge.model.v2 import MoGeModel
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from lma_extractor import LMAExtractor
-from visualizer import render_comprehensive_dashboard
+from utils.lma_extractor import LMAExtractor
+from utils.visualizer import render_comprehensive_dashboard
 
 def stage_a_nlf_implementation(frame, model, device="cuda"):
     # Convert BGR to RGB and move to GPU in one pipeline
