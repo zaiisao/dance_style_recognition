@@ -1,6 +1,6 @@
 # Dance Style Recognition
 
-Unofficial implementation of the paper:
+Unofficial implementation of the paper *Dance Style Recognition Using Laban Movement Analysis* by Turab et al.:
 https://arxiv.org/abs/2504.21166
 
 This repository extracts 55-dimensional LMA (Laban Movement Analysis) features
