@@ -246,7 +246,10 @@ class LMAExtractor:
         #    Init_j = mean over T-w valid frames of 1[s_j(t_i) > tau_j].
         #    raw_init_values is concat(valid_vals[T-w], padded_tail[w]); slice the valid prefix.
         valid_frame_len = n_frames - window_size
-        assert valid_frame_len > 0, "Video too short for the specified window size."
+        assert n_frames > 2 * window_size, (
+            f"Video too short: needs n_frames > {2 * window_size} "
+            f"(2*window_size for central-diff acceleration), got {n_frames}."
+        )
 
         for joint_name in self.BODY_KEY_JOINTS:
             idx = self.IDX[joint_name]
@@ -320,10 +323,13 @@ class LMAExtractor:
         alphas = np.array([self.weights[name] for name in self.EFFORT_KEY_JOINTS])
 
         # Central-diff velocity for all 6 effort joints at once. Shape (T - 2*w_half, 6, 3).
+        # Denominator uses the actual numerator span (2*w_half) rather than window_size so
+        # the v ≈ ΔP/Δt scaling is exact for both odd and even w. Doc-literal (w·τ_f) is
+        # off by 1/w for odd w; this matches numerically.
         velocity = (
             norm_frames[2 * w_half : n_frames, effort_indices]   # P(t_i + w_half) for t_i ∈ [w_half, n_frames − w_half)
             - norm_frames[0 : n_frames - 2 * w_half, effort_indices]   # P(t_i − w_half) for the same t_i
-        ) / (window_size * self.dt)
+        ) / ((2 * w_half) * self.dt)
 
         # Per-frame whole-body KE: ½ Σ_j α_j ‖v_j‖². Shape (T - 2*w_half,).
         effort_weight_for_all_frames = 0.5 * (np.sum(velocity ** 2, axis=2) @ alphas)
@@ -343,9 +349,9 @@ class LMAExtractor:
         #             total_time += self.weights[joint_name] * feats[f"Effort_Time_{joint_name}"]
         #     feats["Effort_Time"] /= n_frames
         acceleration = (
-            norm_frames[w_half + w_half:, effort_indices]
+            norm_frames[2 * w_half:, effort_indices]
             - 2 * norm_frames[w_half:n_frames - w_half, effort_indices]
-            + norm_frames[:n_frames - w_half, effort_indices]
+            + norm_frames[:n_frames - 2 * w_half, effort_indices]
         ) / (w_half * self.dt) ** 2
 
         # Doc Eq. 23 — Effort Time_j(T) per joint: mean acceleration magnitude over T.
@@ -384,15 +390,33 @@ class LMAExtractor:
         # Feature 52 — Total distance: net displacement (doc Eq. 28).
         feats["Traj_Distance"] = float(np.linalg.norm(pelvis_traj[-1] - pelvis_traj[0]))
 
-        # Feature 53 — Mean geometric curvature κ̄ = mean(||v×a|| / ||v||³) over T (doc Eq. 31–32).
-        # Uses the pelvis vectors of `vel` / `acc` defined above.
-        pelvis_vel = velocity[:, self.IDX["PELVIS"], :]
-        pelvis_acc = acceleration[:, self.IDX["PELVIS"], :]
+        # Feature 53 — Mean geometric curvature κ̄ over the central-diff valid range
+        # t_i ∈ [w, T − w), per doc Eqs. 29–32. Compute pelvis-only v and a inline so
+        # they're aligned by construction (the Effort blocks' velocity/acceleration
+        # arrays use different lags and have different lengths).
+        pelvis = norm_frames[:, self.IDX["PELVIS"], :]
+
+        # Eq. 29 velocity at t_i ∈ [w, T − w), using lag w/2.
+        # Denominator uses actual numerator span (2*w_half) for span-exact scaling on
+        # odd w; matches the Effort Weight velocity convention above.
+        pelvis_vel = (
+            pelvis[window_size + w_half : n_frames - window_size + w_half]
+            - pelvis[window_size - w_half : n_frames - window_size - w_half]
+        ) / ((2 * w_half) * self.dt)
+
+        # Eq. 30 acceleration at the same t_i, using lag w:
+        pelvis_acc = (
+            pelvis[2 * window_size : n_frames]
+            - 2 * pelvis[window_size : n_frames - window_size]
+            + pelvis[: n_frames - 2 * window_size]
+        ) / (window_size * self.dt) ** 2
+
+        # Both shape (n_frames - 2*window_size, 3), aligned at t_i = k + window_size.
         cross_va = np.cross(pelvis_vel, pelvis_acc)
         v_norm = np.linalg.norm(pelvis_vel, axis=1)
         v_cubed = v_norm ** 3
         valid_curv = v_cubed > 1e-12
-        kappa = np.zeros(n_frames)
+        kappa = np.zeros(n_frames - 2 * window_size)
         if np.any(valid_curv):
             kappa[valid_curv] = np.linalg.norm(cross_va[valid_curv], axis=1) / v_cubed[valid_curv]
         feats["Traj_Curvature_Avg"] = float(np.mean(kappa))

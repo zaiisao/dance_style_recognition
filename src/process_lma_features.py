@@ -185,7 +185,7 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
     print(f"\n[-] Component 2: Space (Kinesphere & Trajectory)")
     
     # Check Curvature: Path_Length / Displacement [cite: 118, 119]
-    curvature = data.get('Traj_Curvature', np.zeros(n_frames))
+    curvature = data.get('Traj_Curvature_Avg', np.zeros(n_frames))
     if np.any(curvature < -1e-6):
         print(f"    [!] FAIL: Negative curvature found. Check path/displacement computation.")
     else:
