@@ -250,12 +250,10 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
     print(f"    [DONE] Verification complete.")
 
 def compute_lma_descriptor(
-    joints,
-    volumes,
+    frames,
     floors,
     fps,
     window_size=55,
-    short_window=5,
     apply_smoothing=False,
 ):
     """
@@ -265,10 +263,9 @@ def compute_lma_descriptor(
     extractor = LMAExtractor(
         window_size=window_size,
         fps=fps,
-        short_window=short_window,
         apply_smoothing=apply_smoothing,
     )
-    lma_dict = extractor.extract_all_features(joints, volumes, floors)
+    lma_dict = extractor.extract_all_features(frames, floors)
     
     # Flatten to matrix
     feature_keys = sorted(lma_dict.keys())
@@ -283,7 +280,6 @@ def process_single_video(
     moge_model,
     device="cuda",
     viz=False,
-    short_window=5,
     apply_smoothing=False,
 ):
     # Create dynamic filenames based on the specific video name
@@ -303,7 +299,7 @@ def process_single_video(
     if fps <= 0:
         fps = 30.0
 
-    all_joints = []
+    all_frames = []
     all_volumes = []
     all_vertices = []
     all_floor_models = []
@@ -316,7 +312,7 @@ def process_single_video(
     should_use_debug_data = False
     if should_use_debug_data:
         data = np.load("debug_data.npz", allow_pickle=True)
-        all_joints = data['joints']
+        all_frames = data['joints']
         all_volumes = data['volumes']
         floor_params = data['floor'] # (N, 2) array of slope/intercept
 
@@ -398,9 +394,9 @@ def process_single_video(
                         all_vertices.append(None)
                 
                 if joints_np is not None:
-                    all_joints.append(joints_np)
+                    all_frames.append(joints_np)
                 else:
-                    all_joints.append([]) # Keep list length consistent
+                    all_frames.append([]) # Keep list length consistent
                 
                 all_volumes.append(current_vol)
 
@@ -409,7 +405,7 @@ def process_single_video(
                     pelvis_y_vals.append(joints_np[0, 1])  # Pelvis Y
                     pbar.set_postfix(vol=f"{current_vol:.3f}")
                 else:
-                    # Keep the lists the same length as all_joints
+                    # Keep the lists the same length as all_frames
                     pelvis_depths.append(np.nan)
                     pelvis_y_vals.append(np.nan)
                 
@@ -434,14 +430,13 @@ def process_single_video(
 
         print("Video processing complete.")
 
-    verify_pipeline_integrity(all_joints, all_volumes, all_floor_models)
+    verify_pipeline_integrity(all_frames, all_volumes, all_floor_models)
 
     lma_dict, lma_matrix = compute_lma_descriptor(
-        all_joints, all_volumes,
+        all_frames,
         all_floor_models,
         fps,
         window_size=55,
-        short_window=short_window,
         apply_smoothing=apply_smoothing,
     )
 
@@ -462,7 +457,7 @@ def process_single_video(
         print("\n--- GENERATING VISUAL DEBUG ASSETS ---")
         render_comprehensive_dashboard(
             video_path, 
-            all_joints, 
+            all_frames, 
             all_vertices, 
             all_floor_models, 
             scene_cloud,
@@ -486,12 +481,6 @@ def main():
                         help="Enable debug video generation")
 
     parser.add_argument(
-        "--short_window",
-        type=int,
-        default=5,
-        help="Short lag window (frames) used for initiation and lagged-space metrics.",
-    )
-    parser.add_argument(
         "--apply_smoothing",
         action="store_true",
         help="Enable Savitzky-Golay smoothing.",
@@ -499,11 +488,10 @@ def main():
 
     args = parser.parse_args()
 
-    short_window = max(1, int(args.short_window))
     apply_smoothing = bool(args.apply_smoothing)
 
     print(
-        f"Extractor config -> short_window={short_window}, apply_smoothing={apply_smoothing}"
+        f"Extractor config -> apply_smoothing={apply_smoothing}"
     )
 
     # Create output directory
@@ -540,7 +528,6 @@ def main():
                 moge_model, 
                 device, 
                 viz=args.viz,
-                short_window=short_window,
                 apply_smoothing=apply_smoothing,
             )
         except Exception as e:
