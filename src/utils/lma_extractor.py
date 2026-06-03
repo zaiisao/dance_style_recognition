@@ -246,9 +246,12 @@ class LMAExtractor:
         #    Init_j = mean over T-w valid frames of 1[s_j(t_i) > tau_j].
         #    raw_init_values is concat(valid_vals[T-w], padded_tail[w]); slice the valid prefix.
         valid_frame_len = n_frames - window_size
-        assert n_frames > 2 * window_size, (
-            f"Video too short: needs n_frames > {2 * window_size} "
-            f"(2*window_size for central-diff acceleration), got {n_frames}."
+        # Curvature (Feature 53) now uses Option-5 asymmetric boundary differences
+        # (doc Eqs. 6 & 9), so it no longer needs a 2*window_size span. The binding floor
+        # is window_size: the inherently forward Initiation (doc Eq. 7) and backward
+        # Effort-Space (doc Eq. 8) sums need at least one valid frame, i.e. n > window_size.
+        assert n_frames > window_size, (
+            f"Video too short: needs n_frames > {window_size} (window_size), got {n_frames}."
         )
 
         for joint_name in self.BODY_KEY_JOINTS:
@@ -390,36 +393,58 @@ class LMAExtractor:
         # Feature 52 — Total distance: net displacement (doc Eq. 28).
         feats["Traj_Distance"] = float(np.linalg.norm(pelvis_traj[-1] - pelvis_traj[0]))
 
-        # Feature 53 — Mean geometric curvature κ̄ over the central-diff valid range
-        # t_i ∈ [w, T − w), per doc Eqs. 29–32. Compute pelvis-only v and a inline so
-        # they're aligned by construction (the Effort blocks' velocity/acceleration
-        # arrays use different lags and have different lengths).
+        # Feature 53 — Mean geometric curvature (doc Eqs. 29-32).
+        # v (doc Eq. 6, lag w/2) and a (doc Eq. 9, lag w) use OPTION-5 asymmetric boundary
+        # differences: forward-looking near the start, backward-looking near the end,
+        # centered in the middle, so both are defined on EVERY frame ("no data loss",
+        # doc Section 1.5). This is what removes the old n_frames > 2*window_size floor:
+        # a clip with n_frames > window_size now yields a curvature.
         pelvis = norm_frames[:, self.IDX["PELVIS"], :]
+        w, wh, dt = window_size, w_half, self.dt
+        idx = np.arange(n_frames)
+        last = n_frames - 1
 
-        # Eq. 29 velocity at t_i ∈ [w, T − w), using lag w/2.
-        # Denominator uses actual numerator span (2*w_half) for span-exact scaling on
-        # odd w; matches the Effort Weight velocity convention above.
-        pelvis_vel = (
-            pelvis[window_size + w_half : n_frames - window_size + w_half]
-            - pelvis[window_size - w_half : n_frames - window_size - w_half]
-        ) / ((2 * w_half) * self.dt)
+        # Velocity v(t_i), all scaled by (w*dt): centered in the interior, forward (lag w)
+        # near the start, backward (lag w) near the end (doc Eq. 6). Frames whose required
+        # neighbour runs off the clip stay NaN and are dropped from the mean.
+        vel = np.full((n_frames, 3), np.nan)
+        c = (idx >= wh) & (idx <= last - wh)
+        vel[c] = (pelvis[idx[c] + wh] - pelvis[idx[c] - wh]) / (w * dt)
+        fwd = (idx < wh) & (idx + w <= last)
+        vel[fwd] = (pelvis[idx[fwd] + w] - pelvis[idx[fwd]]) / (w * dt)
+        bwd = (idx > last - wh) & (idx - w >= 0)
+        vel[bwd] = (pelvis[idx[bwd]] - pelvis[idx[bwd] - w]) / (w * dt)
 
-        # Eq. 30 acceleration at the same t_i, using lag w:
-        pelvis_acc = (
-            pelvis[2 * window_size : n_frames]
-            - 2 * pelvis[window_size : n_frames - window_size]
-            + pelvis[: n_frames - 2 * window_size]
-        ) / (window_size * self.dt) ** 2
+        # Acceleration a(t_i): centered (lag w) where it fits, else derived from the
+        # velocity field with lag w/2 at the boundaries (doc Eq. 9). Fill order
+        # centered -> forward -> backward never overwrites a finite value with NaN.
+        acc = np.full((n_frames, 3), np.nan)
+        cA = (idx >= w) & (idx <= last - w)
+        acc[cA] = (pelvis[idx[cA] + w] - 2 * pelvis[idx[cA]] + pelvis[idx[cA] - w]) / (w * dt) ** 2
 
-        # Both shape (n_frames - 2*window_size, 3), aligned at t_i = k + window_size.
-        cross_va = np.cross(pelvis_vel, pelvis_acc)
-        v_norm = np.linalg.norm(pelvis_vel, axis=1)
-        v_cubed = v_norm ** 3
-        valid_curv = v_cubed > 1e-12
-        kappa = np.zeros(n_frames - 2 * window_size)
-        if np.any(valid_curv):
-            kappa[valid_curv] = np.linalg.norm(cross_va[valid_curv], axis=1) / v_cubed[valid_curv]
-        feats["Traj_Curvature_Avg"] = float(np.mean(kappa))
+        def _fill(mask, vals):
+            take = mask & ~np.isfinite(acc).all(axis=1)
+            acc[take] = vals[take]
+
+        if wh > 0:
+            tmp = np.full((n_frames, 3), np.nan)
+            fA = (idx < w) & (idx + wh <= last)
+            tmp[fA] = (vel[idx[fA] + wh] - vel[idx[fA]]) / (wh * dt)
+            _fill(fA, tmp)
+            tmp = np.full((n_frames, 3), np.nan)
+            bA = (idx > last - w) & (idx - wh >= 0)
+            tmp[bA] = (vel[idx[bA]] - vel[idx[bA] - wh]) / (wh * dt)
+            _fill(bA, tmp)
+
+        # kappa = |v x a| / |v|^3, averaged over frames where v, a are finite and |v| > 0.
+        good = np.isfinite(vel).all(axis=1) & np.isfinite(acc).all(axis=1)
+        v_norm = np.linalg.norm(np.where(good[:, None], vel, 0.0), axis=1)
+        good &= v_norm ** 3 > 1e-12
+        if np.any(good):
+            kappa = np.linalg.norm(np.cross(vel[good], acc[good]), axis=1) / (v_norm[good] ** 3)
+            feats["Traj_Curvature_Avg"] = float(np.mean(kappa))
+        else:
+            feats["Traj_Curvature_Avg"] = 0.0
 
         # ---------------------------------------------------------
         # SHAPE COMPONENT (Feature 54) — doc §5
