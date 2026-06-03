@@ -267,10 +267,12 @@ def compute_lma_descriptor(
     )
     lma_dict = extractor.extract_all_features(frames, floors)
     
-    # Flatten to matrix
+    # Flatten to matrix. Features are now per-video scalars, so the descriptor is a
+    # single (1, n_features) row (one "sample" per clip) — matches train_lma.load_dataset,
+    # which treats shape[0] as the sample count and asserts shape[1]==55.
     feature_keys = sorted(lma_dict.keys())
-    lma_matrix = np.stack([lma_dict[k] for k in feature_keys], axis=1)
-    
+    lma_matrix = np.array([lma_dict[k] for k in feature_keys], dtype=float).reshape(1, -1)
+
     return lma_dict, lma_matrix
 
 def process_single_video(
