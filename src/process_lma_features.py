@@ -1,5 +1,8 @@
 import torch
-import torchvision
+try:
+    import torchvision  # noqa: F401  (unused; guarded so envs with a broken torchvision still import)
+except Exception:
+    pass
 import numpy as np
 import argparse
 import cv2
@@ -253,27 +256,52 @@ def compute_lma_descriptor(
     frames,
     floors,
     fps,
-    window_size=55,
+    window_len=55,
+    window_stride=27,
+    lag=None,
     apply_smoothing=False,
 ):
     """
-    The 'Frozen' logic. Any external consumer (NLF, MoGe, or WHAM) 
-    can pass data here to get the 55-feature vector.
-    """
-    extractor = LMAExtractor(
-        window_size=window_size,
-        fps=fps,
-        apply_smoothing=apply_smoothing,
-    )
-    lma_dict = extractor.extract_all_features(frames, floors)
-    
-    # Flatten to matrix. Features are now per-video scalars, so the descriptor is a
-    # single (1, n_features) row (one "sample" per clip) — matches train_lma.load_dataset,
-    # which treats shape[0] as the sample count and asserts shape[1]==55.
-    feature_keys = sorted(lma_dict.keys())
-    lma_matrix = np.array([lma_dict[k] for k in feature_keys], dtype=float).reshape(1, -1)
+    Faithful per-WINDOW LMA descriptor (Turab et al., sliding window of 55 frames).
 
-    return lma_dict, lma_matrix
+    Slides a `window_len`-frame window over the clip with step `window_stride`, and emits
+    ONE faithful (1, 55) feature vector per window position. Returns
+    (per_window_dicts, lma_matrix) where lma_matrix has shape (num_windows, 55) — one
+    sample per WINDOW, not per frame.
+
+    `lag` is the extractor's internal velocity/displacement lag (LMAExtractor.window_size,
+    doc Eqs. 2/17). The extractor requires n_frames > lag, so for a 55-frame window the
+    lag must be < 55; it defaults to window_len // 2. To reproduce the tier-task lag of 55,
+    use a longer window, e.g. window_len=110, lag=55.
+    """
+    n = len(frames)
+    if lag is None:
+        lag = max(2, window_len // 2)
+
+    # Sliding FULL windows only. A clip shorter than window_len yields zero windows and is
+    # excluded entirely (Turab-style: fragments shorter than the window are dropped — no
+    # partial or padded windows). Every emitted window is exactly window_len frames.
+    spans = [(s, s + window_len)
+             for s in range(0, n - window_len + 1, max(1, window_stride))]
+
+    rows, per_window_dicts = [], []
+    for (s, e) in spans:
+        win_frames = frames[s:e]
+        win_floors = floors[s:e]
+        win_lag = min(lag, len(win_frames) - 1)   # guarantee n_frames > window_size
+        if win_lag < 1:
+            continue
+        extractor = LMAExtractor(window_size=win_lag, fps=fps,
+                                 apply_smoothing=apply_smoothing)
+        d = extractor.extract_all_features(win_frames, win_floors)
+        feature_keys = sorted(d.keys())
+        rows.append([float(d[k]) for k in feature_keys])
+        per_window_dicts.append(d)
+
+    if not rows:
+        return [], np.zeros((0, 55), dtype=float)
+    lma_matrix = np.asarray(rows, dtype=float)   # (num_windows, 55)
+    return per_window_dicts, lma_matrix
 
 def process_single_video(
     video_path,
@@ -283,6 +311,9 @@ def process_single_video(
     device="cuda",
     viz=False,
     apply_smoothing=False,
+    window_len=55,
+    window_stride=27,
+    lag=None,
 ):
     # Create dynamic filenames based on the specific video name
     base_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -434,26 +465,24 @@ def process_single_video(
 
     verify_pipeline_integrity(all_frames, all_volumes, all_floor_models)
 
-    lma_dict, lma_matrix = compute_lma_descriptor(
+    per_window_dicts, lma_matrix = compute_lma_descriptor(
         all_frames,
         all_floor_models,
         fps,
-        window_size=55,
+        window_len=window_len,
+        window_stride=window_stride,
+        lag=lag,
         apply_smoothing=apply_smoothing,
     )
 
     print(f"[-] Feature Extraction Complete")
-    print(f"    Feature Matrix Shape: {lma_matrix.shape} (Frames x Features)")
+    print(f"    Feature Matrix Shape: {lma_matrix.shape} (Windows x Features)")
 
-    # 4. Save both formats
-    np.save(npy_output_path, lma_matrix) 
-    dict_output_path = npy_output_path.replace("_features.npy", "_dict.npy")
-    np.save(dict_output_path, lma_dict) 
-
-    print(f"    Saved Matrix to:   {npy_output_path}")
-    print(f"    Saved Dictionary to: {dict_output_path}")
-    
-    verify_lma_integrity(dict_output_path, plot_output_path=plot_output_path)
+    # Save per-window matrix: one faithful (1,55) row per window position.
+    # train_lma.load_dataset reads this as (num_windows, 55), one sample per window,
+    # grouped by clip id (the filename) for GroupKFold.
+    np.save(npy_output_path, lma_matrix)
+    print(f"    Saved {lma_matrix.shape[0]} windows to: {npy_output_path}")
 
     if viz:
         print("\n--- GENERATING VISUAL DEBUG ASSETS ---")
@@ -463,7 +492,7 @@ def process_single_video(
             all_vertices, 
             all_floor_models, 
             scene_cloud,
-            lma_features=lma_dict,
+            lma_features=(per_window_dicts[0] if per_window_dicts else {}),
             output_path=video_output_path
         )
 
@@ -487,6 +516,11 @@ def main():
         action="store_true",
         help="Enable Savitzky-Golay smoothing.",
     )
+    parser.add_argument("--window_len", type=int, default=55,
+                        help="Sliding window length in frames (one (1,55) sample per window).")
+    parser.add_argument("--window_stride", type=int, default=27, help="Window step in frames.")
+    parser.add_argument("--lag", type=int, default=None,
+                        help="Extractor velocity lag; must be < window_len (default window_len//2).")
 
     args = parser.parse_args()
 

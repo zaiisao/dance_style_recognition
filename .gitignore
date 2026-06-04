@@ -178,3 +178,5 @@ pyrightconfig.json
 models/
 *.mp4
 *.png
+# local NLF model checkpoint (symlink to external 471MB weights — never commit)
+models

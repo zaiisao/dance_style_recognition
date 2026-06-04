@@ -463,6 +463,138 @@ class LMAExtractor:
 
         return feats
 
+    def extract_per_frame_features(self, all_frames, all_floor_models):
+        """Per-FRAME (T,55) LMA stream — the same 55 features evaluated at EVERY frame
+        using lag w, BEFORE the time-aggregation that extract_all_features applies.
+        Returns a dict {name: (T,) array} with the SAME keys as extract_all_features, so
+        np.stack([pf[k] for k in sorted(pf)], axis=1) is a (T,55) whose columns match the
+        (1,55). For time-MEAN features the column mean equals the aggregate scalar (this is
+        the correctness oracle); sum/ratio/net features (Effort_Space, Traj_Path/Distance,
+        Initiation) use their natural per-frame decomposition. Dynamic lag-w terms are
+        edge-padded at the boundary frames so every frame is defined. Same preprocessing
+        (impute + floor-normalize) and the corrected SMPL-24 joints as extract_all_features.
+        """
+        cleaned = self._impute_missing_data(all_frames)
+        norm = self._normalize_pose_to_floor(cleaned, all_floor_models)
+        T = len(all_frames)
+        w = self.window_size
+        wh = w // 2
+        dt = self.dt
+        assert T > w, f"need T > window_size ({w}), got {T}"
+        pf = {}
+
+        def align(vals, start):
+            """Place a shorter valid array at [start, start+len) and edge-pad to length T."""
+            out = np.empty(T, dtype=float)
+            n = len(vals)
+            out[start:start + n] = vals
+            if start > 0:
+                out[:start] = vals[0]
+            if start + n < T:
+                out[start + n:] = vals[-1]
+            return out
+
+        def dist_pf(k1, k2):
+            a = norm[:, self.IDX[k1], :]; b = norm[:, self.IDX[k2], :]
+            return np.linalg.norm(a - b, axis=1)
+
+        def angle_pf(ka, kb, kc):
+            a = norm[:, self.IDX[ka]]; b = norm[:, self.IDX[kb]]; c = norm[:, self.IDX[kc]]
+            u = a - b; v = c - b
+            nu = np.linalg.norm(u, axis=1); nv = np.linalg.norm(v, axis=1)
+            out = np.zeros(T); valid = (nu > 1e-9) & (nv > 1e-9)
+            cos = np.sum(u[valid] * v[valid], axis=1) / (nu[valid] * nv[valid])
+            out[valid] = np.arccos(np.clip(cos, -1.0, 1.0))
+            return out
+
+        # BODY distances D1-D8 (exact per-frame; mean == aggregate)
+        pf["Dist_Hand_Shoulder_L"]   = dist_pf("L_HAND", "L_SHOULDER")
+        pf["Dist_Hand_Shoulder_R"]   = dist_pf("R_HAND", "R_SHOULDER")
+        pf["Dist_Pelvis_Shoulder_L"] = dist_pf("PELVIS", "L_SHOULDER")
+        pf["Dist_Pelvis_Shoulder_R"] = dist_pf("PELVIS", "R_SHOULDER")
+        pf["Dist_Hands"]             = dist_pf("L_HAND", "R_HAND")
+        pf["Dist_Shoulders"]         = dist_pf("L_SHOULDER", "R_SHOULDER")
+        pf["Dist_Ankles"]            = dist_pf("L_ANKLE", "R_ANKLE")
+        pf["Dist_Knees"]             = dist_pf("L_KNEE", "R_KNEE")
+        # BODY angles A1-A6 (exact per-frame; mean == aggregate)
+        pf["Angle_LArm"]      = angle_pf("L_WRIST", "L_SHOULDER", "PELVIS")
+        pf["Angle_RArm"]      = angle_pf("R_WRIST", "R_SHOULDER", "PELVIS")
+        pf["Angle_Shoulders"] = angle_pf("L_SHOULDER", "PELVIS", "R_SHOULDER")
+        pf["Angle_LKnee"]     = angle_pf("PELVIS", "L_KNEE", "L_ANKLE")
+        pf["Angle_RKnee"]     = angle_pf("PELVIS", "R_KNEE", "R_ANKLE")
+        pf["Angle_Hips"]      = angle_pf("L_KNEE", "PELVIS", "R_KNEE")
+        # Initiation 15-23: per-frame indicator 1[v(t) > sigma] (forward lag-w speed; mean == aggregate)
+        for jn in self.BODY_KEY_JOINTS:
+            idx = self.IDX[jn]
+            diffs = norm[w:, idx] - norm[:T - w, idx]
+            vel = np.linalg.norm(diffs, axis=1) / (w * dt)
+            pf[f"Initiation_{jn}"] = align((vel > np.std(vel)).astype(float), 0)
+        # EFFORT Space 24-31: per-frame lag-w displacement / net (sum == aggregate)
+        eff_w_total = sum(self.weights[j] for j in self.EFFORT_KEY_JOINTS)
+        es_avg = np.zeros(T)
+        for jn in self.EFFORT_KEY_JOINTS:
+            idx = self.IDX[jn]
+            disp = np.linalg.norm(norm[w:, idx] - norm[:T - w, idx], axis=1)
+            net = np.linalg.norm(norm[T - 1, idx] - norm[0, idx]) + 1e-9
+            es = align(disp / net, 0)
+            pf[f"Effort_Space_{jn}"] = es
+            es_avg += self.weights[jn] * es
+        pf["Effort_Space_Avg"] = es_avg / eff_w_total
+        # EFFORT Weight 31: per-frame whole-body KE (central lag w_half; mean ~ aggregate)
+        eidx = [self.IDX[j] for j in self.EFFORT_KEY_JOINTS]
+        alphas = np.array([self.weights[j] for j in self.EFFORT_KEY_JOINTS])
+        vel_c = (norm[2 * wh:T, eidx] - norm[0:T - 2 * wh, eidx]) / ((2 * wh) * dt)
+        pf["Effort_Weight_Avg"] = align(0.5 * (np.sum(vel_c ** 2, axis=2) @ alphas), wh)
+        # EFFORT Time 32-38: per-frame acceleration magnitude per joint (central lag w_half; mean ~ aggregate)
+        acc_c = (norm[2 * wh:, eidx] - 2 * norm[wh:T - wh, eidx] + norm[:T - 2 * wh, eidx]) / (wh * dt) ** 2
+        acc_mag = np.linalg.norm(acc_c, axis=2)
+        for i, jn in enumerate(self.EFFORT_KEY_JOINTS):
+            pf[f"Effort_Time_{jn}"] = align(acc_mag[:, i], wh)
+        pf["Effort_Time_Avg"] = sum(self.weights[jn] * pf[f"Effort_Time_{jn}"]
+                                    for jn in self.EFFORT_KEY_JOINTS) / eff_w_total
+        # SPACE dispersions 39-50 + 55 (exact per-frame; mean == aggregate)
+        for j in ["L_SHOULDER", "R_SHOULDER", "L_ELBOW", "R_ELBOW", "L_HAND", "R_HAND"]:
+            pf[f"Disp_Upper_{j}"] = dist_pf(j, "SPINE1")
+        for j in ["L_HIP", "R_HIP", "L_KNEE", "R_KNEE", "L_FOOT", "R_FOOT"]:
+            pf[f"Disp_Lower_{j}"] = dist_pf(j, "PELVIS")
+        pf["Disp_Head"] = dist_pf("HEAD", "SPINE1")
+        # SPACE trajectory 51-52: per-frame pelvis step (sum == path); running net displacement (last == distance)
+        pelvis = norm[:, self.IDX["PELVIS"], :]
+        pf["Traj_Path"] = align(np.linalg.norm(pelvis[1:] - pelvis[:-1], axis=1), 1)
+        pf["Traj_Distance"] = np.linalg.norm(pelvis - pelvis[0], axis=1)
+        # SPACE curvature 53: per-frame kappa (Option-5 vel/acc, same as aggregate; 0 where undefined)
+        idxa = np.arange(T); last = T - 1
+        vel = np.full((T, 3), np.nan)
+        c = (idxa >= wh) & (idxa <= last - wh);  vel[c]   = (pelvis[idxa[c] + wh] - pelvis[idxa[c] - wh]) / (w * dt)
+        fwd = (idxa < wh) & (idxa + w <= last);  vel[fwd] = (pelvis[idxa[fwd] + w] - pelvis[idxa[fwd]]) / (w * dt)
+        bwd = (idxa > last - wh) & (idxa - w >= 0); vel[bwd] = (pelvis[idxa[bwd]] - pelvis[idxa[bwd] - w]) / (w * dt)
+        acc = np.full((T, 3), np.nan)
+        cA = (idxa >= w) & (idxa <= last - w); acc[cA] = (pelvis[idxa[cA] + w] - 2 * pelvis[idxa[cA]] + pelvis[idxa[cA] - w]) / (w * dt) ** 2
+
+        def _fill(mask, vals):
+            take = mask & ~np.isfinite(acc).all(axis=1)
+            acc[take] = vals[take]
+        if wh > 0:
+            tmp = np.full((T, 3), np.nan); fA = (idxa < w) & (idxa + wh <= last)
+            tmp[fA] = (vel[idxa[fA] + wh] - vel[idxa[fA]]) / (wh * dt); _fill(fA, tmp)
+            tmp = np.full((T, 3), np.nan); bA = (idxa > last - w) & (idxa - wh >= 0)
+            tmp[bA] = (vel[idxa[bA]] - vel[idxa[bA] - wh]) / (wh * dt); _fill(bA, tmp)
+        good = np.isfinite(vel).all(axis=1) & np.isfinite(acc).all(axis=1)
+        vn = np.linalg.norm(np.where(good[:, None], vel, 0.0), axis=1)
+        good &= vn ** 3 > 1e-12
+        kappa = np.zeros(T)
+        kappa[good] = np.linalg.norm(np.cross(vel[good], acc[good]), axis=1) / (vn[good] ** 3)
+        pf["Traj_Curvature_Avg"] = kappa
+        # SHAPE 54: per-frame ConvexHull volume (exact per-frame; mean == aggregate)
+        vol = np.zeros(T)
+        for i in range(T):
+            try:
+                vol[i] = ConvexHull(norm[i]).volume
+            except Exception:
+                vol[i] = 0.0
+        pf["Body_Volume_Avg"] = vol
+        return pf
+
     def _add_feat(self, feat_dict, key, val, t):
         if key not in feat_dict:
             # Use body_volume as the length reference
