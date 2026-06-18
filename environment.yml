@@ -497,4 +497,3 @@ dependencies:
       - websocket-client==1.9.0
       - xarray==2026.1.0
       - yarl==1.22.0
-prefix: /home/sogang/mnt/db_2/anaconda3/envs/dance-recognition

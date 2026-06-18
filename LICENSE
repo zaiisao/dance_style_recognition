@@ -1,0 +1,18 @@
+Copyright (c) 2026 Jaehoon Ahn (Sogang University).
+
+This repository — an unofficial reimplementation of the LMA feature extractor of
+Turab et al., "Dance Style Recognition Using Laban Movement Analysis"
+(arXiv:2504.21166) — is licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0).
+
+You are free to share and adapt the material for any purpose, even commercially,
+provided you give appropriate credit, link to the license, and indicate if changes
+were made.
+
+The full license text is available at:
+    https://creativecommons.org/licenses/by/4.0/legalcode
+
+This extractor is used by the SIGGRAPH Posters '26 paper "Appearance-Invariant
+Detection of Suggestive Motion via Laban Movement Descriptors"
+(https://doi.org/10.1145/3799825.3818709). If you use this code, please credit both
+this repository and the original Turab et al. paper.

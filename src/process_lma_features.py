@@ -140,7 +140,7 @@ def verify_pipeline_integrity(all_joints, all_volumes, all_floor_models):
 
 def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png"):
     """
-    Comprehensive audit for the 55-feature LMA descriptor.
+    Comprehensive audit for the 61-feature LMA descriptor.
     Validates components: Body (12), Effort (28), Space (8), Shape (1), Kinematics (6).
     """
     print(f"\n{'='*60}\nAUDITING LMA FEATURE VECTOR: {npy_path}\n{'='*60}")
@@ -156,13 +156,13 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
     n_features = len(keys)
     n_frames = len(data[keys[0]])
     
-    # Requirement: Vector must contain exactly 55 features 
+    # Requirement: Vector must contain exactly 61 features 
     print(f"[-] Descriptor Structure:")
-    print(f"    Total Features: {n_features} (Target: 55)")
+    print(f"    Total Features: {n_features} (Target: 61)")
     print(f"    Total Frames:   {n_frames}")
     
-    if n_features != 55:
-        print(f"    [!] WARNING: Feature count mismatch! Found {n_features}, expected 55.")
+    if n_features != 61:
+        print(f"    [!] WARNING: Feature count mismatch! Found {n_features}, expected 61.")
 
     # ---------------------------------------------------------
     # 1. EFFORT COMPONENT VALIDATION (28 Features)
@@ -219,7 +219,7 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
         print(f"    [!] WARNING: {len(dead_features)} features are static (Zero Variance).")
         print(f"        First 3 static: {dead_features[:3]}")
     else:
-        print(f"    [OK] All 55 features show temporal evolution.")
+        print(f"    [OK] All 61 features show temporal evolution.")
 
     # ---------------------------------------------------------
     # 5. VISUALIZATION: Turab-Style Plotting
@@ -266,8 +266,8 @@ def compute_lma_descriptor(
     Faithful per-WINDOW LMA descriptor (Turab et al., sliding window of 55 frames).
 
     Slides a `window_len`-frame window over the clip with step `window_stride`, and emits
-    ONE faithful (1, 55) feature vector per window position. Returns
-    (per_window_dicts, lma_matrix) where lma_matrix has shape (num_windows, 55) — one
+    ONE faithful (1, 61) feature vector per window position. Returns
+    (per_window_dicts, lma_matrix) where lma_matrix has shape (num_windows, 61) — one
     sample per WINDOW, not per frame.
 
     `lag` is the extractor's internal velocity/displacement lag (LMAExtractor.window_size,
@@ -301,8 +301,8 @@ def compute_lma_descriptor(
         per_window_dicts.append(d)
 
     if not rows:
-        return [], np.zeros((0, 55), dtype=float)
-    lma_matrix = np.asarray(rows, dtype=float)   # (num_windows, 55)
+        return [], np.zeros((0, 61), dtype=float)
+    lma_matrix = np.asarray(rows, dtype=float)   # (num_windows, 61)
     return per_window_dicts, lma_matrix
 
 def process_single_video(
@@ -344,126 +344,100 @@ def process_single_video(
 
     last_valid_volume = 0.0
 
-    should_use_debug_data = False
-    if should_use_debug_data:
-        data = np.load("debug_data.npz", allow_pickle=True)
-        all_frames = data['joints']
-        all_volumes = data['volumes']
-        floor_params = data['floor'] # (N, 2) array of slope/intercept
-
-        def recreate_floor_model(slope, intercept):
-            # 1. Create a raw, untrained model
-            model = QuantileRegressor()
+    current_floor_model = None
+    with tqdm(total=total_frames, desc="Processing Frames", unit="frame") as pbar:
+        frame_idx = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
             
-            # 2. Manually inject the "learned" attributes
-            # Scikit-learn expects coef_ to be an array, even for 1D
-            model.coef_ = np.array([slope]) 
-            model.intercept_ = intercept
+            # --- STAGE B: Floor Estimation ---
+            if frame_idx == 0:
+                current_floor_model, _, scene_cloud = stage_b_floor_estimation(frame, moge_model, device)
+
+            # Keep frame-aligned floor models for downstream feature extraction.
+            all_floor_models.append(current_floor_model)
+
+            # --- STAGE A: Pose Estimation (Every Frame) ---
+            # [cite: 77] NLF must run every frame to capture the dance.
+            joints3d, vertices3d = stage_a_nlf_implementation(frame, nlf_model, device=device)
             
-            # 3. (Optional) Trick Scikit-learn's validation checks
-            # Some versions check if 'n_features_in_' exists to confirm fitting
-            model.n_features_in_ = 1 
+            joints_np = None
+            current_vol = last_valid_volume
             
-            return model
-
-        # Example usage with the loaded data
-        slope, intercept = floor_params[0] # Get frame 0
-        floor_model = recreate_floor_model(slope, intercept)
-    else:
-        current_floor_model = None
-        with tqdm(total=total_frames, desc="Processing Frames", unit="frame") as pbar:
-            frame_idx = 0
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            if len(vertices3d) > 0 and len(vertices3d[0]) > 0:
+                # 1. Fetch from GPU ONCE
+                verts_np = vertices3d[0].detach().cpu().numpy()
+                joints_np = joints3d[0].detach().cpu().numpy()
                 
-                # --- STAGE B: Floor Estimation ---
-                if frame_idx == 0:
-                    current_floor_model, _, scene_cloud = stage_b_floor_estimation(frame, moge_model, device)
-
-                # Keep frame-aligned floor models for downstream feature extraction.
-                all_floor_models.append(current_floor_model)
-
-                # --- STAGE A: Pose Estimation (Every Frame) ---
-                # [cite: 77] NLF must run every frame to capture the dance.
-                joints3d, vertices3d = stage_a_nlf_implementation(frame, nlf_model, device=device)
+                # 2. Handle dimensions
+                if verts_np.ndim == 3: verts_np = verts_np[0]
+                if joints_np.ndim == 3: joints_np = joints_np[0]
                 
-                joints_np = None
-                current_vol = last_valid_volume
-                
-                if len(vertices3d) > 0 and len(vertices3d[0]) > 0:
-                    # 1. Fetch from GPU ONCE
-                    verts_np = vertices3d[0].detach().cpu().numpy()
-                    joints_np = joints3d[0].detach().cpu().numpy()
-                    
-                    # 2. Handle dimensions
-                    if verts_np.ndim == 3: verts_np = verts_np[0]
-                    if joints_np.ndim == 3: joints_np = joints_np[0]
-                    
-                    # 3. Apply Scaling to the CPU copy (mm -> meters)
-                    # This ensures both the visualizer AND the volume calc get the scaled data
-                    if np.mean(np.abs(verts_np[:, 2])) > 10.0: 
-                        verts_np /= 1000.0
-                        joints_np /= 1000.0
+                # 3. Apply Scaling to the CPU copy (mm -> meters)
+                # This ensures both the visualizer AND the volume calc get the scaled data
+                if np.mean(np.abs(verts_np[:, 2])) > 10.0: 
+                    verts_np /= 1000.0
+                    joints_np /= 1000.0
 
-                    # 4. Save for Viz
-                    if viz:
-                        all_vertices.append(verts_np.astype(np.float16))
+                # 4. Save for Viz
+                if viz:
+                    all_vertices.append(verts_np.astype(np.float16))
+                else:
+                    all_vertices.append(None)
+
+                # 5. Calculate Volume (Reuse verts_np)
+                try:
+                    if verts_np.shape[0] > 3: # ConvexHull needs >3 points
+                        hull = ConvexHull(verts_np)
+                        current_vol = hull.volume
                     else:
-                        all_vertices.append(None)
-
-                    # 5. Calculate Volume (Reuse verts_np)
-                    try:
-                        if verts_np.shape[0] > 3: # ConvexHull needs >3 points
-                            hull = ConvexHull(verts_np)
-                            current_vol = hull.volume
-                        else:
-                            current_vol = 0.0
-                    except Exception:
-                        current_vol = last_valid_volume
-                    
-                    last_valid_volume = current_vol
-                else:
-                    if viz:
-                        all_vertices.append(None)
+                        current_vol = 0.0
+                except Exception:
+                    current_vol = last_valid_volume
                 
-                if joints_np is not None:
-                    all_frames.append(joints_np)
-                else:
-                    all_frames.append([]) # Keep list length consistent
-                
-                all_volumes.append(current_vol)
-
-                if joints_np is not None:
-                    pelvis_depths.append(joints_np[0, 2]) # Pelvis Z
-                    pelvis_y_vals.append(joints_np[0, 1])  # Pelvis Y
-                    pbar.set_postfix(vol=f"{current_vol:.3f}")
-                else:
-                    # Keep the lists the same length as all_frames
-                    pelvis_depths.append(np.nan)
-                    pelvis_y_vals.append(np.nan)
-                
-                frame_idx += 1
-                pbar.update(1)
-                
-        cap.release()
-
-        if len(pelvis_depths) > 0:
-            z_array = np.array(pelvis_depths).reshape(-1, 1)
-            # Filter frames where detection was successful
-            valid_mask = ~np.isnan(pelvis_depths)
+                last_valid_volume = current_vol
+            else:
+                if viz:
+                    all_vertices.append(None)
             
-            if np.any(valid_mask):
-                # One single call for the entire video
-                all_floor_ys = current_floor_model.predict(z_array[valid_mask])
-                actual_pelvis_ys = np.array(pelvis_y_vals)[valid_mask]
-                
-                # Calculate all heights at once
-                all_heights = all_floor_ys - actual_pelvis_ys
-                print(f"[-] Mean grounding height: {np.mean(all_heights):.3f}m")
+            if joints_np is not None:
+                all_frames.append(joints_np)
+            else:
+                all_frames.append([]) # Keep list length consistent
+            
+            all_volumes.append(current_vol)
 
-        print("Video processing complete.")
+            if joints_np is not None:
+                pelvis_depths.append(joints_np[0, 2]) # Pelvis Z
+                pelvis_y_vals.append(joints_np[0, 1])  # Pelvis Y
+                pbar.set_postfix(vol=f"{current_vol:.3f}")
+            else:
+                # Keep the lists the same length as all_frames
+                pelvis_depths.append(np.nan)
+                pelvis_y_vals.append(np.nan)
+            
+            frame_idx += 1
+            pbar.update(1)
+            
+    cap.release()
+
+    if len(pelvis_depths) > 0:
+        z_array = np.array(pelvis_depths).reshape(-1, 1)
+        # Filter frames where detection was successful
+        valid_mask = ~np.isnan(pelvis_depths)
+        
+        if np.any(valid_mask):
+            # One single call for the entire video
+            all_floor_ys = current_floor_model.predict(z_array[valid_mask])
+            actual_pelvis_ys = np.array(pelvis_y_vals)[valid_mask]
+            
+            # Calculate all heights at once
+            all_heights = all_floor_ys - actual_pelvis_ys
+            print(f"[-] Mean grounding height: {np.mean(all_heights):.3f}m")
+
+    print("Video processing complete.")
 
     verify_pipeline_integrity(all_frames, all_volumes, all_floor_models)
 
@@ -480,8 +454,8 @@ def process_single_video(
     print(f"[-] Feature Extraction Complete")
     print(f"    Feature Matrix Shape: {lma_matrix.shape} (Windows x Features)")
 
-    # Save per-window matrix: one faithful (1,55) row per window position.
-    # train_lma.load_dataset reads this as (num_windows, 55), one sample per window,
+    # Save per-window matrix: one faithful (1,61) row per window position.
+    # train_lma.load_dataset reads this as (num_windows, 61), one sample per window,
     # grouped by clip id (the filename) for GroupKFold.
     np.save(npy_output_path, lma_matrix)
     print(f"    Saved {lma_matrix.shape[0]} windows to: {npy_output_path}")
@@ -534,7 +508,7 @@ def main():
         help="Enable Savitzky-Golay smoothing.",
     )
     parser.add_argument("--window_len", type=int, default=55,
-                        help="Sliding window length in frames (one (1,55) sample per window).")
+                        help="Sliding window length in frames (one (1,61) sample per window).")
     parser.add_argument("--window_stride", type=int, default=27, help="Window step in frames.")
     parser.add_argument("--lag", type=int, default=None,
                         help="Extractor velocity lag; must be < window_len (default window_len//2).")

@@ -180,3 +180,10 @@ models/
 *.png
 # local NLF model checkpoint (symlink to external 471MB weights — never commit)
 models
+
+# generated / dev artifacts — regenerable, not vendored
+debug_data.npz
+lma_features_output.npy
+aist_filtered_videos.txt
+*_features.npy
+*_pose.npz

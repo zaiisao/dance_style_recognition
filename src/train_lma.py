@@ -2,8 +2,8 @@
 Window-level dance-style classification on faithful per-window LMA features.
 
 CORRECTED PIPELINE:
-  * One sample = one 55-frame WINDOW (a faithful (1,55) LMA descriptor), NOT one frame.
-    The input dir holds one `<clip>_features.npy` of shape (num_windows, 55) per clip.
+  * One sample = one 55-frame WINDOW (a faithful (1,61) LMA descriptor), NOT one frame.
+    The input dir holds one `<clip>_features.npy` of shape (num_windows, 61) per clip.
   * CV groups = clip id, so windows of a clip never straddle train/test.
     `--mode original` (GroupKFold, the DEFAULT) is the honest generalization split.
     `--mode shuffled` (plain KFold) ignores clips -> same-clip windows leak across
@@ -131,8 +131,8 @@ def load_dataset(input_dir):
                 print(f"  [!] Unsupported data shape for {filename}: {data.shape}. Skipping.")
                 continue
 
-            if data.shape[1] != 55:
-                print(f"  [!] Warning: {filename} has {data.shape[1]} features (expected 55). Proceeding anyway.")
+            if data.shape[1] != 61:
+                print(f"  [!] Warning: {filename} has {data.shape[1]} features (expected 61). Proceeding anyway.")
 
             video_id = filename.replace('_features.npy', '')
 

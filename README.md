@@ -3,9 +3,17 @@
 Unofficial implementation of the paper *Dance Style Recognition Using Laban Movement Analysis* by Turab et al.:
 https://arxiv.org/abs/2504.21166
 
-This repository extracts 55-dimensional LMA (Laban Movement Analysis) features
-from dance videos and trains a GPU-accelerated classifier to recognize dance
-styles on the AIST++ dataset.
+This repository extracts per-frame LMA (Laban Movement Analysis) features from
+dance videos and trains a GPU-accelerated classifier to recognize dance styles
+on the AIST++ dataset. The extractor emits **61 features** — the 55 of Turab et
+al. plus six inter-joint angles (`Angle_{LArm,RArm,Shoulders,LKnee,RKnee,Hips}`).
+Per-joint dynamics use a lag-1 (`derivative="gradient"`) finite difference by
+default.
+
+> This is also the LMA extractor used by *Appearance-Invariant Detection of
+> Suggestive Motion via Laban Movement Descriptors* (SIGGRAPH Posters '26,
+> [doi:10.1145/3799825.3818709](https://doi.org/10.1145/3799825.3818709)); see
+> [zaiisao/suggestive-motion-lma](https://github.com/zaiisao/suggestive-motion-lma).
 
 ## Repository Layout
 - `src/process_lma_features.py`: LMA feature extraction from videos.
@@ -41,8 +49,9 @@ python src/process_lma_features.py \
 ```
 
 Outputs:
-- `<video>_features.npy`: matrix of shape `(T, 55)`
-- `<video>_dict.npy`: dict of named feature arrays
+- `<video>_features.npy`: per-window LMA matrix of shape `(num_windows, 61)`
+- `<video>_pose.npz`: cached raw joints + per-clip floor model, so any feature-set
+  variant can be recomputed on CPU without re-running the pose/depth stack
 
 ## Training and Evaluation
 Train with video-level splits (`GroupKFold`, recommended):
