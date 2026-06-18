@@ -188,7 +188,7 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
     print(f"\n[-] Component 2: Space (Kinesphere & Trajectory)")
     
     # Check Curvature: Path_Length / Displacement [cite: 118, 119]
-    curvature = data.get('Traj_Curvature_Avg', np.zeros(n_frames))
+    curvature = data.get('Traj_Curvature', np.zeros(n_frames))
     if np.any(curvature < -1e-6):
         print(f"    [!] FAIL: Negative curvature found. Check path/displacement computation.")
     else:
@@ -260,6 +260,7 @@ def compute_lma_descriptor(
     window_stride=27,
     lag=None,
     apply_smoothing=False,
+    derivative="gradient",
 ):
     """
     Faithful per-WINDOW LMA descriptor (Turab et al., sliding window of 55 frames).
@@ -292,7 +293,8 @@ def compute_lma_descriptor(
         if win_lag < 1:
             continue
         extractor = LMAExtractor(window_size=win_lag, fps=fps,
-                                 apply_smoothing=apply_smoothing)
+                                 apply_smoothing=apply_smoothing,
+                                 derivative=derivative)
         d = extractor.extract_all_features(win_frames, win_floors)
         feature_keys = sorted(d.keys())
         rows.append([float(d[k]) for k in feature_keys])
@@ -483,6 +485,21 @@ def process_single_video(
     # grouped by clip id (the filename) for GroupKFold.
     np.save(npy_output_path, lma_matrix)
     print(f"    Saved {lma_matrix.shape[0]} windows to: {npy_output_path}")
+
+    # Cache raw NLF joints + floor params so any feature-set variant can be recomputed on
+    # CPU (seconds) without re-running NLF/MoGe. Floor is one regressor per clip (slope,
+    # intercept). Wrapped so a cache failure never aborts the (expensive) extraction.
+    try:
+        _floor = all_floor_models[0] if all_floor_models else None
+        _slope = float(np.ravel(_floor.coef_)[0]) if _floor is not None else 0.0
+        _intercept = float(_floor.intercept_) if _floor is not None else 0.0
+        cache_path = os.path.join(output_dir, f"{base_name}_pose.npz")
+        np.savez_compressed(cache_path,
+                            joints=np.array(all_frames, dtype=object),
+                            fps=float(fps), slope=_slope, intercept=_intercept)
+        print(f"    Cached {len(all_frames)} joint frames + floor to: {cache_path}")
+    except Exception as _e:
+        print(f"    [cache] joint cache skipped: {_e}")
 
     if viz:
         print("\n--- GENERATING VISUAL DEBUG ASSETS ---")
