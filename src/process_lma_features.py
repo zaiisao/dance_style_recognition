@@ -7,6 +7,7 @@ import os
 import glob
 from scipy.spatial import ConvexHull
 from floor import MoGeFloorEstimator, FlatFloorEstimator, FloorEstimator  # noqa: F401
+from pose import NLFPoseEstimator, PoseEstimator  # noqa: F401
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -18,16 +19,9 @@ from utils.visualizer import render_comprehensive_dashboard
 # import the data-producing extractor without pulling in torch/cv2/MoGe.
 from lma_descriptor import IdentityFloor, compute_lma_descriptor
 
-def stage_a_nlf_implementation(frame, model, device="cuda"):
-    # Convert BGR to RGB and move to GPU in one pipeline
-    frame_tensor = torch.from_numpy(frame[..., ::-1].copy()).to(device)
-    frame_tensor = frame_tensor.permute(2, 0, 1).float() / 255.0
-    frame_batch = frame_tensor.unsqueeze(0)
-
-    with torch.inference_mode():
-        pred = model.detect_smpl_batched(frame_batch)
-    
-    return pred['joints3d'], pred['vertices3d']
+# Per-frame pose now lives in pose.py as the pluggable NLFPoseEstimator (default).
+# process_single_video takes a `pose_estimator` so the pose backend can be overridden.
+# See pose.py.
 
 # Floor estimation now lives in floor.py as the pluggable MoGeFloorEstimator (default)
 # / FlatFloorEstimator. process_single_video takes a `floor_estimator` so the depth model
@@ -221,18 +215,25 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
 def process_single_video(
     video_path,
     output_dir,
-    nlf_model,
+    nlf_model=None,
     moge_model=None,
     device="cuda",
     viz=False,
     short_window=5,
     apply_smoothing=False,
     floor_estimator=None,
+    pose_estimator=None,
 ):
-    # Floor estimation is pluggable. Default: MoGe (the dance paper's depth-based floor).
-    # Pass floor_estimator=FlatFloorEstimator() for ground-aligned joints (no depth model),
-    # or any object with estimate(frame) -> floor_model. moge_model (a preloaded MoGe) is
-    # kept for backwards compatibility and is wrapped here when no estimator is given.
+    # Pose and floor are both pluggable.
+    #  - pose_estimator: default NLF (the dance paper's per-frame pose). Override with your
+    #    own backend (anything with estimate(frame) -> (joints3d, vertices3d)).
+    #  - floor_estimator: default MoGe (the dance paper's depth-based floor). Pass
+    #    FlatFloorEstimator() for ground-aligned joints (no depth model), or any object with
+    #    estimate(frame) -> floor_model.
+    # nlf_model / moge_model (preloaded models) are kept for backwards compatibility and are
+    # wrapped here when no estimator is given.
+    if pose_estimator is None:
+        pose_estimator = NLFPoseEstimator(model=nlf_model, device=device)
     if floor_estimator is None:
         floor_estimator = MoGeFloorEstimator(model=moge_model, device=device)
 
@@ -285,7 +286,7 @@ def process_single_video(
 
                 # --- STAGE A: Pose Estimation (Every Frame) ---
                 # NLF must run every frame to capture the dance.
-                joints3d, vertices3d = stage_a_nlf_implementation(frame, nlf_model, device=device)
+                joints3d, vertices3d = pose_estimator.estimate(frame)
                 
                 joints_np = None
                 current_vol = last_valid_volume
@@ -453,11 +454,11 @@ def main():
 
     print(f"Found {len(video_files)} items to process.")
 
-    # 3. LOAD MODELS (Once per process)
-    print("Loading Models...")
-    nlf_model = torch.jit.load('models/nlf_l_multi_0.3.2.torchscript').to(device).eval()
-    # Default floor backend: MoGe (loads its checkpoint lazily on the first frame).
-    # Swap for FlatFloorEstimator() if your joints are already ground-aligned.
+    # 3. SET UP BACKENDS (default = the dance pipeline's NLF pose + MoGe floor).
+    # Both load their checkpoints lazily on the first frame. Swap either for a custom
+    # estimator (e.g. FlatFloorEstimator() for ground-aligned joints) to customize.
+    print("Setting up pose / floor backends...")
+    pose_estimator = NLFPoseEstimator(device=device)
     floor_estimator = MoGeFloorEstimator(device=device)
 
     # 4. RUN SEQUENTIALLY
@@ -467,11 +468,11 @@ def main():
             process_single_video(
                 video_path,
                 args.output_dir,
-                nlf_model,
                 device=device,
                 viz=args.viz,
                 short_window=short_window,
                 apply_smoothing=apply_smoothing,
+                pose_estimator=pose_estimator,
                 floor_estimator=floor_estimator,
             )
         except Exception as e:
