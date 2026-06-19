@@ -6,8 +6,13 @@ class LMAExtractor:
     def __init__(self, window_size=55, fps=60, short_window=5, apply_smoothing=False):
         """
         Laban Movement Analysis Feature Extractor.
-        Faithfully implements the 55-feature vector described in Turab et al. (2025),
-        incorporating specific lag-based Space metrics and threshold-based Initiation.
+
+        A best-effort reconstruction of the descriptor of Turab et al. (2025). They state
+        54-55 features but publish no feature list and no code; read literally, their
+        descriptor (inter-joint distances AND angles, dispersions, the four Effort factors,
+        Initiation, trajectory, body volume) sums to 61, so we emit all 61 rather than drop
+        six to force their count. Includes the lag-based Space metrics and threshold-based
+        Initiation; per-joint dynamics are causal-window means of lag-1 finite differences.
         """
         self.window_size = window_size
         self.fps = fps
@@ -95,7 +100,8 @@ class LMAExtractor:
 
     def extract_all_features(self, all_joints, all_volumes, all_floor_models):
         """
-        Extracts the 55 LMA features with corrected Equation 1 & 2 logic.
+        Extracts the 61 LMA features (a literal reading of the Turab et al. descriptor;
+        see __init__) with corrected Equation 1 & 2 logic.
         """
         # 1. Preprocessing
         cleaned_joints = self._impute_missing_data(all_joints)
@@ -285,7 +291,8 @@ class LMAExtractor:
                 self._add_feat(feats, f"Initiation_{name}", init_feat, t)
 
 
-        # --- 6 inter-joint angles (the 55->61 superset; positional, version-invariant) ---
+        # --- 6 inter-joint angles (part of the literal-61 reading; Turab cites "angles
+        # between the hands, shoulders, pelvis, knees, and ankles"); positional ---
         def angle_pf(ka, kb, kc):
             a = norm_joints[:, self.IDX[ka]]; b = norm_joints[:, self.IDX[kb]]; c = norm_joints[:, self.IDX[kc]]
             u = a - b; v = c - b

@@ -5,10 +5,16 @@ https://arxiv.org/abs/2504.21166
 
 This repository extracts per-frame LMA (Laban Movement Analysis) features from
 dance videos and trains a GPU-accelerated classifier to recognize dance styles
-on the AIST++ dataset. The extractor emits **61 features** — the 55 of Turab et
-al. plus six inter-joint angles (`Angle_{LArm,RArm,Shoulders,LKnee,RKnee,Hips}`).
-Per-joint dynamics use a lag-1 (`derivative="gradient"`) finite difference by
-default.
+on the AIST++ dataset.
+
+The extractor emits **61 features**. Turab et al. state 54–55 features but publish
+no feature list and no code, so the exact set is unrecoverable. Reading their
+described descriptor literally — including the inter-joint angles they cite ("the
+distances *and angles* between the hands, shoulders, pelvis, knees, and ankles")
+among the other components — adds up to 61, not 55. We therefore keep all 61 rather
+than arbitrarily drop six to force their stated count: a superset is safer than
+guessing which to discard. Per-joint dynamics are computed as the mean over a causal
+55-frame window of lag-1 finite differences.
 
 > This is also the LMA extractor used by *Appearance-Invariant Detection of
 > Suggestive Motion via Laban Movement Descriptors* (SIGGRAPH Posters '26,
