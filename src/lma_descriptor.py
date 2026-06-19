@@ -32,3 +32,27 @@ def compute_lma_descriptor(joints, volumes, floors, fps,
     keys = sorted(lma_dict)
     matrix = np.stack([lma_dict[k] for k in keys], axis=1)
     return lma_dict, matrix
+
+
+def hull_volume(points, fallback=0.0):
+    """Convex-hull volume of one frame's points ``(V, 3)``; returns ``fallback`` on a
+    degenerate (coplanar / <4-point) frame instead of raising."""
+    from scipy.spatial import ConvexHull
+    try:
+        return float(ConvexHull(points).volume)
+    except Exception:
+        return fallback
+
+
+def mesh_volume(verts, initial=0.07):
+    """Per-frame convex-hull body volume over ``(T, V, 3)`` mesh vertices -> ``(T,)`` float64.
+
+    The single definition of the Shape feature's volume. On a degenerate frame it carries
+    forward the last valid volume (seeded with ``initial``), matching the pipeline that
+    produced the published ``features.npz`` (so this stays bit-for-bit reproducible)."""
+    vols = np.empty(len(verts), dtype=np.float64)
+    last = float(initial)
+    for t, v in enumerate(verts):
+        last = hull_volume(v, fallback=last)
+        vols[t] = last
+    return vols

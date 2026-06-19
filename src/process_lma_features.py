@@ -5,7 +5,7 @@ import argparse
 import cv2
 import os
 import glob
-from scipy.spatial import ConvexHull
+
 from floor import MoGeFloorEstimator, FlatFloorEstimator, FloorEstimator  # noqa: F401
 from pose import NLFPoseEstimator, PoseEstimator  # noqa: F401
 from tqdm import tqdm
@@ -17,7 +17,7 @@ from utils.visualizer import render_comprehensive_dashboard
 # IdentityFloor + compute_lma_descriptor live in the lightweight, dependency-free
 # lma_descriptor module so consumers (e.g. the WHAM suggestive-motion pipeline) can
 # import the data-producing extractor without pulling in torch/cv2/MoGe.
-from lma_descriptor import IdentityFloor, compute_lma_descriptor
+from lma_descriptor import IdentityFloor, compute_lma_descriptor, hull_volume
 
 # Per-frame pose now lives in pose.py as the pluggable NLFPoseEstimator (default).
 # process_single_video takes a `pose_estimator` so the pose backend can be overridden.
@@ -312,16 +312,9 @@ def process_single_video(
                     else:
                         all_vertices.append(None)
 
-                    # 5. Calculate Volume (Reuse verts_np)
-                    try:
-                        if verts_np.shape[0] > 3: # ConvexHull needs >3 points
-                            hull = ConvexHull(verts_np)
-                            current_vol = hull.volume
-                        else:
-                            current_vol = 0.0
-                    except Exception:
-                        current_vol = last_valid_volume
-                    
+                    # 5. Body volume (Shape feature; single definition in lma_descriptor).
+                    # Carries forward the last valid volume on a degenerate/<4-point frame.
+                    current_vol = hull_volume(verts_np, fallback=last_valid_volume)
                     last_valid_volume = current_vol
                 else:
                     if viz:
