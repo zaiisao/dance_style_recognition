@@ -1,54 +1,19 @@
 import numpy as np
 from scipy.spatial import ConvexHull
-
+from scipy.signal import savgol_filter
 
 class LMAExtractor:
-    def __init__(self, window_size=55, fps=60, apply_smoothing=False, derivative="gradient"):
+    def __init__(self, window_size=55, fps=60, short_window=5, apply_smoothing=False):
         """
         Laban Movement Analysis Feature Extractor.
         Faithfully implements the 55-feature vector described in Turab et al. (2025),
         incorporating specific lag-based Space metrics and threshold-based Initiation.
-
-        The per-joint dynamics (velocity / KE / acceleration / jerk) use either
-        derivative='gradient' (np.gradient chain, lag-1) or derivative='central'.
-
-        Faithfulness note: Turab et al. (arXiv:2504.21154 §3.3 / 2504.21166 §3.3) name v / a
-        only as "the velocity / acceleration of a joint" and give NO finite-difference
-        formula; their window w is the Initiation (Eq.1) / Space (Eq.2) lag and the sliding-
-        aggregation window, NOT a derivative stencil. The faithful reading of an unspecified
-        per-frame derivative is the lag-1 successive difference -> derivative='gradient' (the
-        default, and what reproduces the papers). derivative='central' is a NON-PAPER lag-w
-        scheme (from the compute_55-10.pdf reference doc, not the papers), kept for comparison
-        only — it corresponds to no equation in either paper.
         """
         self.window_size = window_size
         self.fps = fps
         self.dt = 1.0 / fps if fps > 0 else 1.0 / 30.0
+        self.short_window = max(1, int(short_window))
         self.apply_smoothing = apply_smoothing
-        assert derivative in ("gradient", "central"), \
-            f"derivative must be 'gradient' or 'central', got {derivative!r}"
-        self.derivative = derivative
-
-        # JA: From MPII:
-        # https://raw.githubusercontent.com/open-mmlab/mmpose/main/configs/_base_/datasets/mpii.py
-        # joint_weights=[
-        #     1.5, # right_ankle
-        #     1.2, # right_knee
-        #     1.,  # right_hip
-        #     1.,  # left_hip
-        #     1.2, # left_knee
-        #     1.5, # left_ankle
-        #     1.,  # pelvis
-        #     1.,  # thorax
-        #     1.,  # upper_neck
-        #     1.,  # head_top
-        #     1.5, # right_wrist
-        #     1.2, # right_elbow
-        #     1.,  # right_shoulder
-        #     1.,  # left_shoulder
-        #     1.2, # left_elbow
-        #     1.5  # left_wrist
-        # ],
 
         # Standard SMPL 24-joint topology
         self.IDX = {
@@ -56,61 +21,40 @@ class LMAExtractor:
             "L_HIP": 1,
             "R_HIP": 2,
             "SPINE1": 3,
-            "L_KNEE": 4, # 1.2
-            "R_KNEE": 5, # 1.2
+            "L_KNEE": 4,
+            "R_KNEE": 5,
             "SPINE2": 6,
-            "L_ANKLE": 7, # 1.5
-            "R_ANKLE": 8, # 1.5
+            "L_ANKLE": 7,
+            "R_ANKLE": 8,
             "SPINE3": 9,
-            "L_FOOT": 10, # 1.5 (from L_ANKLE)
-            "R_FOOT": 11, # 1.5 (from R_ANKLE)
+            "L_FOOT": 10,
+            "R_FOOT": 11,
             "NECK": 12,
             "L_COLLAR": 13,
             "R_COLLAR": 14,
             "HEAD": 15,
             "L_SHOULDER": 16,
             "R_SHOULDER": 17,
-            "L_ELBOW": 18, # 1.2
-            "R_ELBOW": 19, # 1.2
-            "L_WRIST": 20, # 1.5
-            "R_WRIST": 21, # 1.5
-            "L_HAND": 22, # 1.5 (from L_WRIST)
-            "R_HAND": 23, # 1.5 (from R_WRIST)
+            "L_ELBOW": 18,
+            "R_ELBOW": 19,
+            "L_WRIST": 20,
+            "R_WRIST": 21,
+            "L_HAND": 22,
+            "R_HAND": 23,
         }
 
-        # Turab's 6 key joints, per the SHAP figures (head, pelvis, wrists, ankles).
-        # The per-joint dynamics/Effort and the Initiation events share this set.
-        self.BODY_KEY_JOINTS = [
-            "HEAD", "PELVIS",
-            "L_WRIST", "R_WRIST",
-            "L_ANKLE", "R_ANKLE"
-        ]
-        self.EFFORT_KEY_JOINTS = self.BODY_KEY_JOINTS
+        # The 6 Key Joints identified from SHAP plots and Effort descriptions
+        self.KEY_JOINTS = ["HEAD", "PELVIS", "L_WRIST", "R_WRIST", "L_ANKLE", "R_ANKLE"]
 
-        # Per-joint weights translated from MPII (mmpose) to SMPL's 24-joint topology.
-        # MPII extremities (wrists, ankles) = 1.5; mid-limb (elbows, knees) = 1.2;
-        # everything else = 1.0. SMPL adds joints with no direct MPII equivalent —
-        # hands inherit from wrists, feet inherit from ankles, collars/spines default to 1.0.
-        self.weights = {
-            "PELVIS":     1.0,
-            "L_HIP":      1.0, "R_HIP":      1.0,
-            "SPINE1":     1.0, "SPINE2":     1.0, "SPINE3":     1.0,
-            "L_KNEE":     1.2, "R_KNEE":     1.2,
-            "L_ANKLE":    1.5, "R_ANKLE":    1.5,
-            "L_FOOT":     1.5, "R_FOOT":     1.5,   # inherit from ankle
-            "NECK":       1.0,
-            "L_COLLAR":   1.0, "R_COLLAR":   1.0,
-            "HEAD":       1.0,
-            "L_SHOULDER": 1.0, "R_SHOULDER": 1.0,
-            "L_ELBOW":    1.2, "R_ELBOW":    1.2,
-            "L_WRIST":    1.5, "R_WRIST":    1.5,
-            "L_HAND":     1.5, "R_HAND":     1.5,   # inherit from wrist
-        }
+        # Weights for Global Sums (extremities get higher weight)
+        self.weights = {k: 1.0 for k in self.KEY_JOINTS}
+        for k in ["L_WRIST", "R_WRIST", "L_ANKLE", "R_ANKLE"]:
+            self.weights[k] = 1.5
 
-    def _impute_missing_data(self, all_frames):
+    def _impute_missing_data(self, joint_seq):
         """Linearly interpolates missing frames to ensure continuity."""
-        n_frames = len(all_frames)
-        valid_indices = [i for i, x in enumerate(all_frames) if len(x) > 0]
+        n_frames = len(joint_seq)
+        valid_indices = [i for i, x in enumerate(joint_seq) if len(x) > 0]
 
         if not valid_indices:
             return np.zeros((n_frames, 24, 3))
@@ -119,7 +63,7 @@ class LMAExtractor:
 
         # Fill known values
         for i in valid_indices:
-            full_seq[i] = all_frames[i]
+            full_seq[i] = joint_seq[i]
 
         # Interpolate gaps
         for j in range(24):
@@ -131,7 +75,7 @@ class LMAExtractor:
     def _normalize_pose_to_floor(self, joints, floor_models):
         """
         Converts Camera Space -> Floor-Relative Height.
-        [cite_start]Crucial for 'Floor Aware Body Modeling'[cite: 83].
+        Crucial for 'Floor Aware Body Modeling'.
         """
         normalized = np.copy(joints)
         n_frames = len(joints)
@@ -149,214 +93,223 @@ class LMAExtractor:
 
         return normalized
 
-    def extract_all_features(self, all_frames, all_floor_models):
+    def extract_all_features(self, all_joints, all_volumes, all_floor_models):
         """
-        Aggregate (1,55) descriptor: the time-mean of the per-frame stream, which is the
-        single source of truth (extract_per_frame_features). Clip-level features (Directness,
-        Effort_Space_Global, Initiation, Traj_*) are constant per frame, so their mean
-        returns them unchanged — the per-frame column mean equals the aggregate scalar.
+        Extracts the 55 LMA features with corrected Equation 1 & 2 logic.
         """
-        per_frame = self.extract_per_frame_features(all_frames, all_floor_models)
-        return {k: float(np.mean(v)) for k, v in per_frame.items()}
+        # 1. Preprocessing
+        cleaned_joints = self._impute_missing_data(all_joints)
+        norm_joints = self._normalize_pose_to_floor(cleaned_joints, all_floor_models)
 
-    def extract_per_frame_features(self, all_frames, all_floor_models):
-        """
-        Per-FRAME (T,55) LMA stream — the SINGLE SOURCE OF TRUTH for the descriptor; the
-        aggregate (1,55) is just its time-mean (see extract_all_features). Time-mean
-        features (distances, dispersions, body_volume, per-joint vel/KE/Accel/Jerk and the
-        Weight/Time/Flow globals) vary per frame; clip-level features (Directness,
-        Effort_Space_Global, Initiation, Traj_*) are computed once and broadcast as a
-        constant so their column mean is exact. Dynamic lag-w terms are edge-padded at the
-        boundaries. Derivative convention per self.derivative (the paper's Eqs. 6 & 9 for
-        'central', or np.gradient for 'gradient').
-        """
-        norm_frames = self._normalize_pose_to_floor(
-            self._impute_missing_data(all_frames), all_floor_models)
-        n_frames = len(all_frames)
-        window_size = self.window_size
-        # Floor: the inherently forward Initiation and backward Effort-Space sums (lag w)
-        # need at least one valid frame, i.e. n_frames > window_size.
-        assert n_frames > window_size, (
-            f"Video too short: needs n_frames > {window_size} (window_size), got {n_frames}."
-        )
-        kj = self.EFFORT_KEY_JOINTS
-        effort_indices = [self.IDX[j] for j in kj]
-        pf = {}
+        if self.apply_smoothing:
+            window_len = int(self.fps / 4)
+            if window_len % 2 == 0:
+                window_len += 1
+            window_len = max(5, window_len)
+            poly_order = min(3, window_len - 2)
 
-        def align(vals, start):
-            """Place a shorter valid array at [start, start+len) and edge-pad to length T."""
-            out = np.empty(n_frames, dtype=float)
-            vals = np.asarray(vals, dtype=float)
-            m = len(vals)
-            if m == 0:
-                return np.zeros(n_frames)
-            out[start:start + m] = vals
-            if start > 0:
-                out[:start] = vals[0]
-            if start + m < n_frames:
-                out[start + m:] = vals[-1]
-            return out
+            for j in range(24):
+                for c in range(3):
+                    norm_joints[:, j, c] = savgol_filter(norm_joints[:, j, c], window_len, poly_order, deriv=0)
 
-        def dist_pf(k1, k2):
-            """Per-frame Euclidean distance between two joints."""
-            a = norm_frames[:, self.IDX[k1], :]
-            b = norm_frames[:, self.IDX[k2], :]
-            return np.linalg.norm(a - b, axis=1)
+        vel = np.gradient(norm_joints, self.dt, axis=0)
+        acc = np.gradient(vel, self.dt, axis=0)
+        jerk = np.gradient(acc, self.dt, axis=0)
 
-        def const(x):
-            return np.full(n_frames, float(x), dtype=float)
+        n_frames = len(all_joints)
+        w_main = self.window_size
 
-        # BODY distances (6) — Euclidean distance between landmark pairs (doc Eq. 11).
-        pf["Dist_Hand_Shoulder_L"] = dist_pf("L_WRIST", "L_SHOULDER")
-        pf["Dist_Hand_Shoulder_R"] = dist_pf("R_WRIST", "R_SHOULDER")
-        pf["Dist_Ankle_Knee_L"]    = dist_pf("L_ANKLE", "L_KNEE")
-        pf["Dist_Ankle_Knee_R"]    = dist_pf("R_ANKLE", "R_KNEE")
-        pf["Dist_Hands"]           = dist_pf("L_WRIST", "R_WRIST")
-        pf["Dist_Feet"]            = dist_pf("L_ANKLE", "R_ANKLE")
+        # --- PRE-CALCULATE INITIATION THRESHOLDS (Equation 1 Correction) ---
+        # "Threshold calculated using standard-deviation of the entire sequence"
+        # We calculate the raw initiation metric for the whole video first.
+        w_init = self.short_window
+        init_thresholds = {}
+        raw_init_values = {}
 
-        # SPACE dispersions (5) — head/wrists vs torso (SPINE2), ankles vs pelvis (doc §4.1).
-        pf["Dispersion_Head"]    = dist_pf("HEAD", "SPINE2")
-        pf["Dispersion_R_Wrist"] = dist_pf("R_WRIST", "SPINE2")
-        pf["Dispersion_L_Wrist"] = dist_pf("L_WRIST", "SPINE2")
-        pf["Dispersion_R_Ankle"] = dist_pf("R_ANKLE", "PELVIS")
-        pf["Dispersion_L_Ankle"] = dist_pf("L_ANKLE", "PELVIS")
+        for name in self.KEY_JOINTS:
+            idx = self.IDX[name]
+            raw_vals = []
+            
+            # 1. Calculate for full windows
+            for t in range(n_frames - w_init):
+                # Raw metric: ||P(t+w) - P(t)|| / dt
+                delta = norm_joints[t + w_init, idx] - norm_joints[t, idx]
+                val = np.linalg.norm(delta) / (w_init * self.dt)
+                raw_vals.append(val)
+            
+            # 2. Handle the edge case (last w_init frames) by repeating last valid value
+            if raw_vals:
+                last_val = raw_vals[-1]
+                for _ in range(w_init):
+                    raw_vals.append(last_val)
+            else:
+                # Fallback for videos shorter than w_init
+                raw_vals = [0.0] * n_frames
 
-        # BODY angles (6) — inter-joint angles at limb/torso vertices (Turab §3.3: "Euclidean
-        # distance AND angles between the hands, shoulders, pelvis, knees, and ankles").
-        # Per-frame; window mean == aggregate. [61-D variant C: A's 55 + these 6 angles.]
+            raw_vals = np.array(raw_vals)
+            
+            # 3. Compute Thresholds
+            if len(raw_vals) > 0:
+                sigma = np.std(raw_vals)
+                init_thresholds[name] = max(sigma, 1e-3)
+                raw_init_values[name] = raw_vals # Now full length, no padding needed
+            else:
+                init_thresholds[name] = 1.0
+                raw_init_values[name] = np.zeros(n_frames)
+
+        # Initialize Dictionary
+        feats = {"body_volume": np.zeros(n_frames)}
+
+        # 3. Frame-by-Frame Extraction
+        for t in range(n_frames):
+            # Causal Window: [t-w+1 : t+1]
+            start = max(0, t - w_main + 1)
+            end = t + 1
+            curr_pose = norm_joints[t]
+
+            # ---------------------------------------------------------
+            # COMPONENT 1: RAW KINEMATICS (6 Features)
+            #
+            # ---------------------------------------------------------
+            for name in self.KEY_JOINTS:
+                idx = self.IDX[name]
+                v_mag = np.mean(np.linalg.norm(vel[start:end, idx, :], axis=1))
+                self._add_feat(feats, f"{name}_vel", v_mag, t)
+
+            # ---------------------------------------------------------
+            # COMPONENT 2: EFFORT (28 Features)
+            # ---------------------------------------------------------
+            sums = {"Weight": 0, "Time": 0, "Flow": 0, "Space": 0}
+
+            for name in self.KEY_JOINTS:
+                idx = self.IDX[name]
+                wt = self.weights[name]
+
+                # A. Weight (Kinetic Energy) [Eq 4]
+                v_sq = np.sum(vel[start:end, idx, :] ** 2, axis=1)
+                ke = np.mean(0.5 * v_sq)
+                self._add_feat(feats, f"{name}_KE", ke, t)
+                sums["Weight"] += ke * wt
+
+                # B. Time (Acceleration) [Eq 5]
+                a_mag = np.mean(np.linalg.norm(acc[start:end, idx, :], axis=1))
+                self._add_feat(feats, f"{name}_Accel", a_mag, t)
+                sums["Time"] += a_mag * wt
+
+                # C. Flow (Jerkiness)
+                j_mag = np.mean(np.linalg.norm(jerk[start:end, idx, :], axis=1))
+                self._add_feat(feats, f"{name}_Jerk", j_mag, t)
+                sums["Flow"] += j_mag * wt
+
+                # D. Space (Lagged Directness): paper Eq. Space_j(T)
+                # uses a short lag window w inside a sliding window T.
+                w_lag = self.short_window
+
+                traj = norm_joints[start:end, idx, :]  # Shape (Window_Len, 3)
+                win_len = len(traj)
+
+                numerator = 0.0
+                if win_len > w_lag:
+                    # Sum ||P(i) - P(i-w)||
+                    for i in range(w_lag, win_len):
+                        dist_lag = np.linalg.norm(traj[i] - traj[i - w_lag])
+                        numerator += dist_lag
+                else:
+                    # Fallback for very first frames
+                    numerator = np.sum(np.linalg.norm(np.diff(traj, axis=0), axis=1))
+
+                # Denominator: ||P(T) - P(t1)|| (Displacement of the whole window)
+                disp = np.linalg.norm(traj[-1] - traj[0])
+
+                space_val = numerator / (disp + 1e-6)
+
+                self._add_feat(feats, f"{name}_Directness", space_val, t)
+                sums["Space"] += space_val * wt
+
+            self._add_feat(feats, "Effort_Weight_Global", sums["Weight"], t)
+            self._add_feat(feats, "Effort_Time_Global", sums["Time"], t)
+            self._add_feat(feats, "Effort_Flow_Global", sums["Flow"], t)
+            self._add_feat(feats, "Effort_Space_Global", sums["Space"], t)
+
+            # ---------------------------------------------------------
+            # COMPONENT 3: SPACE (8 Features)
+            # ---------------------------------------------------------
+            def dist(k1, k2):
+                return np.linalg.norm(curr_pose[self.IDX[k1]] - curr_pose[self.IDX[k2]])
+
+            self._add_feat(feats, "Dispersion_Head", dist("HEAD", "SPINE2"), t)
+            self._add_feat(feats, "Dispersion_R_Wrist", dist("R_WRIST", "SPINE2"), t)
+            self._add_feat(feats, "Dispersion_L_Wrist", dist("L_WRIST", "SPINE2"), t)
+            self._add_feat(feats, "Dispersion_R_Ankle", dist("R_ANKLE", "PELVIS"), t)
+            self._add_feat(feats, "Dispersion_L_Ankle", dist("L_ANKLE", "PELVIS"), t)
+
+            root_traj = norm_joints[start:end, self.IDX["PELVIS"], :]
+            total_path = np.sum(np.linalg.norm(np.diff(root_traj, axis=0), axis=1))
+            total_disp = np.linalg.norm(root_traj[-1] - root_traj[0])
+
+            curvature = total_path / (total_disp + 1e-6)
+
+            self._add_feat(feats, "Traj_Path_Length", total_path, t)
+            self._add_feat(feats, "Traj_Displacement", total_disp, t)
+            self._add_feat(feats, "Traj_Curvature", curvature, t)
+
+            # ---------------------------------------------------------
+            # COMPONENT 4: SHAPE (1 Feature)
+            # ---------------------------------------------------------
+            feats["body_volume"][t] = all_volumes[t]
+
+            # ---------------------------------------------------------
+            # COMPONENT 5: BODY (12 Features)
+            # ---------------------------------------------------------
+            # A. Distances
+            self._add_feat(feats, "Dist_Hand_Shoulder_L", dist("L_WRIST", "L_SHOULDER"), t)
+            self._add_feat(feats, "Dist_Hand_Shoulder_R", dist("R_WRIST", "R_SHOULDER"), t)
+            self._add_feat(feats, "Dist_Ankle_Knee_L", dist("L_ANKLE", "L_KNEE"), t)
+            self._add_feat(feats, "Dist_Ankle_Knee_R", dist("R_ANKLE", "R_KNEE"), t)
+            self._add_feat(feats, "Dist_Hands", dist("L_WRIST", "R_WRIST"), t)
+            self._add_feat(feats, "Dist_Feet", dist("L_ANKLE", "R_ANKLE"), t)
+
+            # B. Initiation (Eq 1 Correction)
+            # "Initiation(t) ... > epsilon"
+            # Implements the detection event logic rather than continuous value.
+            for name in self.KEY_JOINTS:
+                raw_val = raw_init_values[name][t]
+                threshold = init_thresholds[name]
+
+                # Boolean Thresholding (Detection Event)
+                if raw_val > threshold:
+                    init_feat = 1.0
+                else:
+                    init_feat = 0.0
+
+                self._add_feat(feats, f"Initiation_{name}", init_feat, t)
+
+
+        # --- 6 inter-joint angles (the 55->61 superset; positional, version-invariant) ---
         def angle_pf(ka, kb, kc):
-            a = norm_frames[:, self.IDX[ka]]; b = norm_frames[:, self.IDX[kb]]; c = norm_frames[:, self.IDX[kc]]
+            a = norm_joints[:, self.IDX[ka]]; b = norm_joints[:, self.IDX[kb]]; c = norm_joints[:, self.IDX[kc]]
             u = a - b; v = c - b
             nu = np.linalg.norm(u, axis=1); nv = np.linalg.norm(v, axis=1)
             out = np.zeros(n_frames); valid = (nu > 1e-9) & (nv > 1e-9)
             cos = np.sum(u[valid] * v[valid], axis=1) / (nu[valid] * nv[valid])
             out[valid] = np.arccos(np.clip(cos, -1.0, 1.0))
             return out
-        pf["Angle_LArm"]      = angle_pf("L_WRIST", "L_SHOULDER", "PELVIS")
-        pf["Angle_RArm"]      = angle_pf("R_WRIST", "R_SHOULDER", "PELVIS")
-        pf["Angle_Shoulders"] = angle_pf("L_SHOULDER", "PELVIS", "R_SHOULDER")
-        pf["Angle_LKnee"]     = angle_pf("PELVIS", "L_KNEE", "L_ANKLE")
-        pf["Angle_RKnee"]     = angle_pf("PELVIS", "R_KNEE", "R_ANKLE")
-        pf["Angle_Hips"]      = angle_pf("L_KNEE", "PELVIS", "R_KNEE")
+        feats["Angle_LArm"]      = angle_pf("L_WRIST", "L_SHOULDER", "PELVIS")
+        feats["Angle_RArm"]      = angle_pf("R_WRIST", "R_SHOULDER", "PELVIS")
+        feats["Angle_Shoulders"] = angle_pf("L_SHOULDER", "PELVIS", "R_SHOULDER")
+        feats["Angle_LKnee"]     = angle_pf("PELVIS", "L_KNEE", "L_ANKLE")
+        feats["Angle_RKnee"]     = angle_pf("PELVIS", "R_KNEE", "R_ANKLE")
+        feats["Angle_Hips"]      = angle_pf("L_KNEE", "PELVIS", "R_KNEE")
 
-        # SHAPE (1) — ConvexHull volume of the 24 joints per frame (doc §5).
-        vol = np.zeros(n_frames)
-        for i in range(n_frames):
-            try:
-                vol[i] = ConvexHull(norm_frames[i]).volume
-            except Exception:
-                # Degenerate frame (collinear/coplanar joints, NaNs): leave at 0.0
-                vol[i] = 0.0
-        pf["body_volume"] = vol
+        # Remove valid-but-duplicate initialization keys to return exactly 61 features (55 + 6 angles)
+        for duplicate in ["weight", "time", "flow", "space"]:
+            if duplicate in feats:
+                del feats[duplicate]
+        
+        return feats
 
-        # EFFORT velocity / acceleration / jerk for the 6 key joints, per self.derivative.
-        # 'gradient' (PAPER-FAITHFUL, default): lag-1 successive differences via np.gradient —
-        #   the minimal reading of the papers' unspecified "velocity / acceleration of a joint"
-        #   (Turab Eqs. 4-5), aggregated over the window w. This is what reproduces the papers.
-        # 'central' (NON-PAPER): the compute_55-10.pdf reference doc's lag-w finite differences
-        #   — a derivation the papers do not contain (they never use w as a derivative stencil;
-        #   see class docstring). Reuses w = 2*w_half frames as the stencil width:
-        #     velocity  ref-doc Eq. 6 (central lag w/2; forward/backward over w at the edges),
-        #     accel     ref-doc Eq. 9 (central lag w; one-sided from the velocity field),
-        #     jerk      3rd central difference [P(t±w/2), P(t±3w/2)] / (w·τf)^3 (one-sided
-        #               from the acceleration field at the edges).
-        #   Every central denominator spans (2*w_half)*self.dt; full length, no data loss;
-        #   source indices are clamped so short clips degrade instead of crashing. Kept for
-        #   comparison only — empirically it underperforms 'gradient' on the 4-way task.
-        w_half = window_size // 2
-        ef = norm_frames[:, effort_indices]
-        n = ef.shape[0]
-        if self.derivative == "central":
-            d1 = (2 * w_half) * self.dt         # w·τf      — velocity / accel / jerk span
-            d2 = d1 ** 2                        # (w·τf)^2  — central acceleration
-            d3 = d1 ** 3                        # (w·τf)^3  — central jerk
-            da = w_half * self.dt               # (w/2)·τf  — one-sided boundary steps
-
-            ar = np.arange(n)
-            def shift(arr, k):
-                """arr shifted by k frames along time, indices clamped to [0, n-1]."""
-                return arr[np.clip(ar + k, 0, n - 1)]
-
-            # velocity: central lag-w/2 interior, forward/backward over w at the edges (Eq. 6)
-            velocity = (shift(ef, w_half) - shift(ef, -w_half)) / d1
-            v_fwd = (shift(ef, 2 * w_half) - ef) / d1
-            v_bwd = (ef - shift(ef, -2 * w_half)) / d1
-            m_fwd, m_bwd = ar < w_half, ar > n - 1 - w_half
-            velocity[m_fwd], velocity[m_bwd] = v_fwd[m_fwd], v_bwd[m_bwd]
-
-            # acceleration: central lag-w interior, one-sided from velocity at the edges (Eq. 9)
-            acceleration = (shift(ef, 2 * w_half) - 2 * ef + shift(ef, -2 * w_half)) / d2
-            a_fwd = (shift(velocity, w_half) - velocity) / da
-            a_bwd = (velocity - shift(velocity, -w_half)) / da
-            m_fwd, m_bwd = ar < 2 * w_half, ar > n - 1 - 2 * w_half
-            acceleration[m_fwd], acceleration[m_bwd] = a_fwd[m_fwd], a_bwd[m_bwd]
-
-            # jerk: 3rd central difference interior, one-sided from acceleration at the edges
-            jerk = (shift(ef, 3 * w_half) - 3 * shift(ef, w_half)
-                    + 3 * shift(ef, -w_half) - shift(ef, -3 * w_half)) / d3
-            j_fwd = (shift(acceleration, w_half) - acceleration) / da
-            j_bwd = (acceleration - shift(acceleration, -w_half)) / da
-            m_fwd, m_bwd = ar < 3 * w_half, ar > n - 1 - 3 * w_half
-            jerk[m_fwd], jerk[m_bwd] = j_fwd[m_fwd], j_bwd[m_bwd]
-
-            start = 0
-        else:  # 'gradient'
-            velocity = np.gradient(norm_frames[:, effort_indices], self.dt, axis=0)
-            acceleration = np.gradient(velocity, self.dt, axis=0)
-            jerk = np.gradient(acceleration, self.dt, axis=0)
-            start = 0
-
-        # Per-joint Kinematics velocity + Effort Weight=KE / Time=‖a‖ / Flow=‖jerk‖, and the
-        # per-frame Weight/Time/Flow globals as Σ_j α_j·(per-joint value) (doc Eqs. 18-24).
-        v_mag = np.linalg.norm(velocity, axis=2)            # (L, 6)
-        a_mag = np.linalg.norm(acceleration, axis=2)
-        j_mag = np.linalg.norm(jerk, axis=2)
-        ke = 0.5 * np.sum(velocity ** 2, axis=2)            # ½‖v‖²
-        g_weight = np.zeros(n_frames)
-        g_time = np.zeros(n_frames)
-        g_flow = np.zeros(n_frames)
-        for i, joint_name in enumerate(kj):
-            a = self.weights[joint_name]
-            pf[f"{joint_name}_vel"]   = align(v_mag[:, i], start)
-            pf[f"{joint_name}_KE"]    = align(ke[:, i], start)
-            pf[f"{joint_name}_Accel"] = align(a_mag[:, i], start)
-            pf[f"{joint_name}_Jerk"]  = align(j_mag[:, i], start)
-            g_weight += a * pf[f"{joint_name}_KE"]
-            g_time   += a * pf[f"{joint_name}_Accel"]
-            g_flow   += a * pf[f"{joint_name}_Jerk"]
-        pf["Effort_Weight_Global"] = g_weight
-        pf["Effort_Time_Global"]   = g_time
-        pf["Effort_Flow_Global"]   = g_flow
-
-        # EFFORT Space (directness) per joint: Σ ||P(t)-P(t-w)|| / ||P(T)-P(0)|| (doc Eq. 17,
-        # lag w) — clip-level ratios broadcast as constants; their weighted sum is the global.
-        g_space = 0.0
-        for joint_name in kj:
-            idx = self.IDX[joint_name]
-            diffs = norm_frames[window_size:, idx] - norm_frames[:n_frames - window_size, idx]
-            total_displacement = float(np.sum(np.linalg.norm(diffs, axis=1)))
-            net_displacement = np.linalg.norm(norm_frames[n_frames - 1, idx] - norm_frames[0, idx]) + 1e-9
-            directness = total_displacement / net_displacement
-            pf[f"{joint_name}_Directness"] = const(directness)
-            g_space += self.weights[joint_name] * directness
-        pf["Effort_Space_Global"] = const(g_space)
-
-        # BODY Initiation (6): proportion of valid frames whose forward lag-w speed exceeds
-        # sigma (doc Eq. 16) — a clip-level rate, broadcast as a constant.
-        for joint_name in kj:
-            idx = self.IDX[joint_name]
-            speeds = np.linalg.norm(
-                norm_frames[window_size:, idx] - norm_frames[:n_frames - window_size, idx],
-                axis=1) / (window_size * self.dt)
-            pf[f"Initiation_{joint_name}"] = const(float(np.mean(speeds > np.std(speeds))))
-
-        # SPACE Trajectory (3) — pelvis path length / net displacement / their ratio
-        # (doc §4.2, Eqs. 27-28) — clip-level, broadcast.
-        pelvis_traj = norm_frames[:, self.IDX["PELVIS"], :]
-        path = float(np.sum(np.linalg.norm(pelvis_traj[1:] - pelvis_traj[:-1], axis=1)))
-        disp = float(np.linalg.norm(pelvis_traj[-1] - pelvis_traj[0]))
-        pf["Traj_Path_Length"]  = const(path)
-        pf["Traj_Displacement"] = const(disp)
-        pf["Traj_Curvature"]    = const(path / (disp + 1e-6))
-
-        return pf
+    def _add_feat(self, feat_dict, key, val, t):
+        if key not in feat_dict:
+            # Use body_volume as the length reference
+            feat_dict[key] = np.zeros(len(feat_dict["body_volume"]))
+        feat_dict[key][t] = val

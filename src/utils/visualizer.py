@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_floor_models, scene_cloud, lma_features=None, output_path="dashboard_output.mp4"):
-    # [cite: 75] 1920x1080 resolution is standard for the AIST++ dataset used in the paper.
+    # 1920x1080 resolution is standard for the AIST++ dataset used in the paper.
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -15,7 +15,7 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
     fig = plt.figure(figsize=(20, 12), dpi=100)
     gs = fig.add_gridspec(2, 2, width_ratios=[1, 1.2], height_ratios=[1, 1.2])
 
-    # [cite: 123] The paper uses a vector of 55 features. We'll map the 4 global effort sums for the chart.
+    # The paper uses a vector of 55 features. We'll map the 4 global effort sums for the chart.
     lma_limit_buffer = 0.15
     lma_limits = {}
     if lma_features:
@@ -33,17 +33,17 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
             
             fig.clf()
             
-            # --- PANEL 1: FLOOR AWARE 3D SCENE [cite: 76, 83] ---
+            # --- PANEL 1: FLOOR AWARE 3D SCENE ---
             ax_scene = fig.add_subplot(gs[0, 1], projection='3d')
             ax_scene.set_title("Floor Aware 3D Reconstruction", fontsize=14, fontweight='bold')
             
-            # Draw Floor Grid (Lime wireframe as per methodology stage 2) [cite: 52]
+            # Draw Floor Grid (Lime wireframe as per methodology stage 2)
             gx, gz = np.meshgrid(np.linspace(-2, 2, 15), np.linspace(0, 5, 15))
             f_model = all_floor_models[frame_idx]
             gy = f_model.predict(gz.flatten().reshape(-1, 1)).reshape(gx.shape)
             ax_scene.plot_wireframe(gx, gz, -gy, color='lime', alpha=0.4, linewidth=0.5)
 
-            # Draw Skeleton [cite: 77]
+            # Draw Skeleton
             joints = all_joints[frame_idx]
             if len(joints) > 0:
                 ax_scene.scatter(joints[:,0], joints[:,2], -joints[:,1], c='red', s=15)
@@ -56,12 +56,12 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
             ax_scene.view_init(elev=20, azim=45)
             ax_scene.set_axis_off()
 
-            # --- PANEL 2: LMA EXPRESSIVE DYNAMICS [cite: 172, 272] ---
+            # --- PANEL 2: LMA EXPRESSIVE DYNAMICS ---
             # Recreating Fig 6 from paper: Long-term kinematic evolution
             ax_lma = fig.add_subplot(gs[1, 1])
             ax_lma.set_title("LMA Effort Evolution (Temporal Context)", fontsize=14, fontweight='bold')
             
-            # Show sliding window of 120 frames to see patterns [cite: 168]
+            # Show sliding window of 120 frames to see patterns
             win = 120
             s_idx, e_idx = max(0, frame_idx - win), frame_idx + 1
             time_axis = np.arange(s_idx, e_idx)
@@ -78,7 +78,7 @@ def render_comprehensive_dashboard(video_path, all_joints, all_vertices, all_flo
             
             ax_lma.axvline(x=frame_idx, color='black', linestyle='--', alpha=0.5)
             ax_lma.legend(loc='upper left', fontsize=10)
-            ax_lma.set_xlabel("Frame Number [cite: 273]", fontsize=12)
+            ax_lma.set_xlabel("Frame Number", fontsize=12)
             ax_lma.set_ylabel("Normalized Magnitude", fontsize=12)
             ax_lma.grid(True, alpha=0.2)
 

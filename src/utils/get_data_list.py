@@ -2,7 +2,7 @@ import os
 import argparse
 from collections import defaultdict
 
-# 1. Criteria from Section 3.1 of the paper
+# 1. AIST++ filename filter criteria
 TARGET_GENRES = ['gBR', 'gPO', 'gLO', 'gWA', 'gMH', 'gLH', 'gHO', 'gKR', 'gJS', 'gJB']
 TARGET_SITUATIONS = ['sBM', 'sFM'] # Basic and Advanced
 TARGET_CAMERA = 'c01'               # Frontal view

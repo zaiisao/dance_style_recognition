@@ -1,16 +1,3 @@
-"""
-Window-level dance-style classification on faithful per-window LMA features.
-
-CORRECTED PIPELINE:
-  * One sample = one 55-frame WINDOW (a faithful (1,61) LMA descriptor), NOT one frame.
-    The input dir holds one `<clip>_features.npy` of shape (num_windows, 61) per clip.
-  * CV groups = clip id, so windows of a clip never straddle train/test.
-    `--mode original` (GroupKFold, the DEFAULT) is the honest generalization split.
-    `--mode shuffled` (plain KFold) ignores clips -> same-clip windows leak across
-    folds -> inflated; kept ONLY as a leaky diagnostic baseline.
-  * Reports BOTH window-level accuracy and clip-level accuracy (majority vote over a
-    clip's windows) -- the latter is the real "does this whole motion belong to genre X".
-"""
 import os
 import glob
 import re
@@ -25,7 +12,7 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib
 from tqdm import tqdm
 
-# Mapping from AIST++ filename codes to full Genre names [cite: 73]
+# Mapping from AIST++ filename codes to full Genre names
 GENRE_MAP = {
     'BR': 'Break', 'HO': 'House', 'JB': 'Jazz Ballet', 'JS': 'Jazz Street',
     'KR': 'Krump', 'LH': 'LA Hip Hop', 'LO': 'Lock', 'MH': 'Middle Hip Hop',
@@ -57,19 +44,6 @@ def _dict_to_matrix(d):
     if not cols:
         raise ValueError("No valid feature arrays found in dict.")
     return np.stack(cols, axis=1)
-
-
-def _clip_majority_vote(groups_test, y_true, y_pred):
-    """Aggregate window-level predictions to ONE prediction per clip (majority vote).
-    y_true is constant within a clip. Returns (clip_accuracy, n_clips)."""
-    from collections import Counter
-    preds, truth = {}, {}
-    for g, t, p in zip(groups_test, y_true, y_pred):
-        preds.setdefault(g, []).append(p)
-        truth[g] = t
-    correct = sum(Counter(ps).most_common(1)[0][0] == truth[g]
-                  for g, ps in preds.items())
-    return correct / len(preds), len(preds)
 
 def load_dataset(input_dir):
     """
@@ -131,8 +105,8 @@ def load_dataset(input_dir):
                 print(f"  [!] Unsupported data shape for {filename}: {data.shape}. Skipping.")
                 continue
 
-            if data.shape[1] != 61:
-                print(f"  [!] Warning: {filename} has {data.shape[1]} features (expected 61). Proceeding anyway.")
+            if data.shape[1] != 55:
+                print(f"  [!] Warning: {filename} has {data.shape[1]} features (expected 55). Proceeding anyway.")
 
             video_id = filename.replace('_features.npy', '')
 
@@ -151,7 +125,7 @@ def load_dataset(input_dir):
     y = np.concatenate(y_list)
     groups = np.concatenate(groups_list)
 
-    print(f"Loaded {X.shape[0]} window samples from {len(np.unique(groups))} clips.")
+    print(f"Loaded {X.shape[0]} frames from {len(np.unique(groups))} videos.")
     print(f"Feature dimension: {X.shape[1]}")
     return X, y, groups
 
@@ -169,7 +143,6 @@ def train_and_evaluate(X, y, groups, mode, save_model_path=None):
     # We keep groups on CPU because GroupKFold needs them to calculate indices
     groups = np.asarray(groups)
     fold_accuracies = []
-    clip_accuracies = []
 
     print("\n" + "="*60)
     print("Starting GPU-Accelerated Evaluation")
@@ -180,9 +153,6 @@ def train_and_evaluate(X, y, groups, mode, save_model_path=None):
         outer_cv = GroupKFold(n_splits=3)
         inner_cv = GroupKFold(n_splits=3)
     elif mode == 'shuffled':
-        print("  [!] WARNING: 'shuffled' is a LEAKY diagnostic baseline — windows of the "
-              "same clip can land in both train and test, inflating accuracy. "
-              "Do NOT report it as a generalization number.")
         outer_cv = KFold(n_splits=3, shuffle=True, random_state=42)
         inner_cv = KFold(n_splits=3, shuffle=True, random_state=42)
 
@@ -232,16 +202,8 @@ def train_and_evaluate(X, y, groups, mode, save_model_path=None):
         acc = accuracy_score(y_test_cpu, y_pred)
         fold_accuracies.append(acc)
 
-        # Clip-level (sequence) accuracy: majority-vote each clip's window predictions.
-        # In 'original' (grouped) mode the test clips are fully held out, so this is the
-        # honest "does this whole motion belong to genre X" number.
-        groups_test = groups[test_idx]
-        clip_acc, n_clips = _clip_majority_vote(groups_test, y_test_cpu, y_pred)
-        clip_accuracies.append(clip_acc)
-
-        print(f"  > Fold window accuracy: {acc:.4f}   |   "
-              f"clip-level (majority vote): {clip_acc:.4f} over {n_clips} clips")
-        print("  > Window-level Classification Report:")
+        print(f"  > Fold Accuracy: {acc:.4f}")
+        print("  > Classification Report:")
         print(classification_report(y_test_cpu, y_pred, target_names=le.classes_, digits=4, zero_division=0))
 
         if save_model_path:
@@ -251,11 +213,7 @@ def train_and_evaluate(X, y, groups, mode, save_model_path=None):
             print(f"  > Saved model to: {fname}")
 
     print("\n" + "="*60)
-    print(f"FINAL MEAN WINDOW ACCURACY: {np.mean(fold_accuracies):.4f}")
-    print(f"FINAL MEAN CLIP ACCURACY (majority vote): {np.mean(clip_accuracies):.4f}")
-    split_desc = ("GroupKFold by clip — honest generalization" if mode == 'original'
-                  else "plain KFold — LEAKY baseline (same-clip windows straddle folds)")
-    print(f"  Split: {split_desc}")
+    print(f"FINAL AVERAGE ACCURACY: {np.mean(fold_accuracies):.4f}")
     print("="*60)
 
 if __name__ == "__main__":
@@ -263,11 +221,9 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--save_models", type=str, default=None,
                         help="Optional folder to save best models per fold")
-    parser.add_argument("--mode", type=str, choices=['original', 'shuffled'],
+    parser.add_argument("--mode", type=str, choices=['original', 'shuffled'], 
                         default='original',
-                        help="'original' = GroupKFold by clip (honest, DEFAULT). "
-                             "'shuffled' = plain KFold ignoring clips (LEAKY baseline; "
-                             "same-clip windows straddle folds -> inflated).")
+                        help="'original' = Split by Video (Harder, Correct). 'shuffled' = Split by Frame (Easier, High Score).")
     args = parser.parse_args()
 
     X, y, groups = load_dataset(args.data_dir)

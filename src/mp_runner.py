@@ -11,7 +11,7 @@ from process_lma_features import process_single_video
 # Import the MoGe model class
 from moge.model.v2 import MoGeModel
 
-def worker_process(gpu_id, queue, output_dir, viz, window_len=55, window_stride=27, lag=None):
+def worker_process(gpu_id, queue, output_dir, viz):
     """
     1. Initializes models on the assigned GPU (Run once per worker)
     2. Consumes files from the queue until empty
@@ -48,15 +48,12 @@ def worker_process(gpu_id, queue, output_dir, viz, window_len=55, window_stride=
         try:
             # Run single-video processing
             process_single_video(
-                video_path=video_path,
-                output_dir=output_dir,
-                nlf_model=nlf_model,
-                moge_model=moge_model,
-                device=device,
-                viz=viz,
-                window_len=window_len,
-                window_stride=window_stride,
-                lag=lag,
+                video_path=video_path, 
+                output_dir=output_dir, 
+                nlf_model=nlf_model, 
+                moge_model=moge_model, 
+                device=device, 
+                viz=viz
             )
             processed_count += 1
         except Exception as e:
@@ -75,13 +72,6 @@ def main():
     parser.add_argument("--workers_per_gpu", type=int, default=6, 
                         help="Number of parallel processes per GPU. (Default: 6)")
     parser.add_argument("--viz", action="store_true", help="Enable debug video generation")
-    parser.add_argument("--window_len", type=int, default=55,
-                        help="Sliding window length in frames (paper: 55). One (1,55) sample per window.")
-    parser.add_argument("--window_stride", type=int, default=27,
-                        help="Window step in frames (default 27 ~= 50%% overlap).")
-    parser.add_argument("--lag", type=int, default=None,
-                        help="Extractor velocity lag (LMAExtractor.window_size); must be < window_len "
-                             "(default window_len//2). Use --window_len 110 --lag 55 for the tier-task lag.")
     args = parser.parse_args()
 
     # 1. Setup
@@ -144,9 +134,8 @@ def main():
     for gpu_id in range(num_gpus):
         for _ in range(args.workers_per_gpu):
             p = mp.Process(
-                target=worker_process,
-                args=(gpu_id, task_queue, args.output_dir, args.viz,
-                      args.window_len, args.window_stride, args.lag)
+                target=worker_process, 
+                args=(gpu_id, task_queue, args.output_dir, args.viz)
             )
             p.start()
             workers.append(p)
