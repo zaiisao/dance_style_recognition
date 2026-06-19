@@ -249,7 +249,6 @@ def process_single_video(
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    DEBUG_DURATION = 3.0 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps <= 0:
         fps = 30.0
@@ -264,98 +263,95 @@ def process_single_video(
 
     last_valid_volume = 0.0
 
-    # (A debug shortcut that replayed a captured debug_data.npz fixture was removed
-    #  for the public release; the real per-frame floor fitting path is below.)
-    if False:
-        pass
-    else:
-        current_floor_model = None
-        with tqdm(total=total_frames, desc="Processing Frames", unit="frame") as pbar:
-            frame_idx = 0
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+    # (A debug shortcut that replayed a captured debug_data.npz fixture was removed for
+    #  the public release; this is the real per-frame floor + pose fitting path.)
+    current_floor_model = None
+    with tqdm(total=total_frames, desc="Processing Frames", unit="frame") as pbar:
+        frame_idx = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
                 
-                # --- STAGE B: Floor Estimation (pluggable; default = MoGe) ---
-                if frame_idx == 0:
-                    current_floor_model = floor_estimator.estimate(frame)
+            # --- STAGE B: Floor Estimation (pluggable; default = MoGe) ---
+            if frame_idx == 0:
+                current_floor_model = floor_estimator.estimate(frame)
 
-                # Keep frame-aligned floor models for downstream feature extraction.
-                all_floor_models.append(current_floor_model)
+            # Keep frame-aligned floor models for downstream feature extraction.
+            all_floor_models.append(current_floor_model)
 
-                # --- STAGE A: Pose Estimation (Every Frame) ---
-                # NLF must run every frame to capture the dance.
-                joints3d, vertices3d = pose_estimator.estimate(frame)
+            # --- STAGE A: Pose Estimation (Every Frame) ---
+            # NLF must run every frame to capture the dance.
+            joints3d, vertices3d = pose_estimator.estimate(frame)
                 
-                joints_np = None
-                current_vol = last_valid_volume
+            joints_np = None
+            current_vol = last_valid_volume
                 
-                if len(vertices3d) > 0 and len(vertices3d[0]) > 0:
-                    # 1. Fetch from GPU ONCE
-                    verts_np = vertices3d[0].detach().cpu().numpy()
-                    joints_np = joints3d[0].detach().cpu().numpy()
+            if len(vertices3d) > 0 and len(vertices3d[0]) > 0:
+                # 1. Fetch from GPU ONCE
+                verts_np = vertices3d[0].detach().cpu().numpy()
+                joints_np = joints3d[0].detach().cpu().numpy()
                     
-                    # 2. Handle dimensions
-                    if verts_np.ndim == 3: verts_np = verts_np[0]
-                    if joints_np.ndim == 3: joints_np = joints_np[0]
+                # 2. Handle dimensions
+                if verts_np.ndim == 3: verts_np = verts_np[0]
+                if joints_np.ndim == 3: joints_np = joints_np[0]
                     
-                    # 3. Apply Scaling to the CPU copy (mm -> meters)
-                    # This ensures both the visualizer AND the volume calc get the scaled data
-                    if np.mean(np.abs(verts_np[:, 2])) > 10.0: 
-                        verts_np /= 1000.0
-                        joints_np /= 1000.0
+                # 3. Apply Scaling to the CPU copy (mm -> meters)
+                # This ensures both the visualizer AND the volume calc get the scaled data
+                if np.mean(np.abs(verts_np[:, 2])) > 10.0: 
+                    verts_np /= 1000.0
+                    joints_np /= 1000.0
 
-                    # 4. Save for Viz
-                    if viz:
-                        all_vertices.append(verts_np.astype(np.float16))
-                    else:
-                        all_vertices.append(None)
-
-                    # 5. Body volume (Shape feature; single definition in lma_descriptor).
-                    # Carries forward the last valid volume on a degenerate/<4-point frame.
-                    current_vol = hull_volume(verts_np, fallback=last_valid_volume)
-                    last_valid_volume = current_vol
+                # 4. Save for Viz
+                if viz:
+                    all_vertices.append(verts_np.astype(np.float16))
                 else:
-                    if viz:
-                        all_vertices.append(None)
-                
-                if joints_np is not None:
-                    all_joints.append(joints_np)
-                else:
-                    all_joints.append([]) # Keep list length consistent
-                
-                all_volumes.append(current_vol)
+                    all_vertices.append(None)
 
-                if joints_np is not None:
-                    pelvis_depths.append(joints_np[0, 2]) # Pelvis Z
-                    pelvis_y_vals.append(joints_np[0, 1])  # Pelvis Y
-                    pbar.set_postfix(vol=f"{current_vol:.3f}")
-                else:
-                    # Keep the lists the same length as all_joints
-                    pelvis_depths.append(np.nan)
-                    pelvis_y_vals.append(np.nan)
+                # 5. Body volume (Shape feature; single definition in lma_descriptor).
+                # Carries forward the last valid volume on a degenerate/<4-point frame.
+                current_vol = hull_volume(verts_np, fallback=last_valid_volume)
+                last_valid_volume = current_vol
+            else:
+                if viz:
+                    all_vertices.append(None)
                 
-                frame_idx += 1
-                pbar.update(1)
+            if joints_np is not None:
+                all_joints.append(joints_np)
+            else:
+                all_joints.append([]) # Keep list length consistent
                 
-        cap.release()
+            all_volumes.append(current_vol)
 
-        if len(pelvis_depths) > 0:
-            z_array = np.array(pelvis_depths).reshape(-1, 1)
-            # Filter frames where detection was successful
-            valid_mask = ~np.isnan(pelvis_depths)
+            if joints_np is not None:
+                pelvis_depths.append(joints_np[0, 2]) # Pelvis Z
+                pelvis_y_vals.append(joints_np[0, 1])  # Pelvis Y
+                pbar.set_postfix(vol=f"{current_vol:.3f}")
+            else:
+                # Keep the lists the same length as all_joints
+                pelvis_depths.append(np.nan)
+                pelvis_y_vals.append(np.nan)
+                
+            frame_idx += 1
+            pbar.update(1)
+                
+    cap.release()
+
+    if len(pelvis_depths) > 0:
+        z_array = np.array(pelvis_depths).reshape(-1, 1)
+        # Filter frames where detection was successful
+        valid_mask = ~np.isnan(pelvis_depths)
             
-            if np.any(valid_mask):
-                # One single call for the entire video
-                all_floor_ys = current_floor_model.predict(z_array[valid_mask])
-                actual_pelvis_ys = np.array(pelvis_y_vals)[valid_mask]
+        if np.any(valid_mask):
+            # One single call for the entire video
+            all_floor_ys = current_floor_model.predict(z_array[valid_mask])
+            actual_pelvis_ys = np.array(pelvis_y_vals)[valid_mask]
                 
-                # Calculate all heights at once
-                all_heights = all_floor_ys - actual_pelvis_ys
-                print(f"[-] Mean grounding height: {np.mean(all_heights):.3f}m")
+            # Calculate all heights at once
+            all_heights = all_floor_ys - actual_pelvis_ys
+            print(f"[-] Mean grounding height: {np.mean(all_heights):.3f}m")
 
-        print("Video processing complete.")
+    print("Video processing complete.")
 
     verify_pipeline_integrity(all_joints, all_volumes, all_floor_models)
 

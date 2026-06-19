@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.spatial import ConvexHull
 from scipy.signal import savgol_filter
 
 class LMAExtractor:
