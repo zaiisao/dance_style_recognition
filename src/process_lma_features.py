@@ -14,13 +14,10 @@ import matplotlib.pyplot as plt
 from utils.lma_extractor import LMAExtractor
 from utils.visualizer import render_comprehensive_dashboard
 
-class IdentityFloor:
-    """Mock floor for consumers whose data is already ground-aligned (e.g., WHAM)."""
-    def predict(self, z):
-        # Force the output to be a flat 1D array of zeros
-        # This matches the shape of joints[i, :, 1] and fixes the broadcast error
-        z = np.array(z)
-        return np.zeros(z.shape[0])
+# IdentityFloor + compute_lma_descriptor live in the lightweight, dependency-free
+# lma_descriptor module so consumers (e.g. the WHAM suggestive-motion pipeline) can
+# import the data-producing extractor without pulling in torch/cv2/MoGe.
+from lma_descriptor import IdentityFloor, compute_lma_descriptor
 
 def stage_a_nlf_implementation(frame, model, device="cuda"):
     # Convert BGR to RGB and move to GPU in one pipeline
@@ -248,33 +245,6 @@ def verify_lma_integrity(npy_path, plot_output_path="lma_verification_plot.png")
     plt.tight_layout()
     plt.savefig(plot_output_path)
     print(f"    [DONE] Verification complete.")
-
-def compute_lma_descriptor(
-    joints,
-    volumes,
-    floors,
-    fps,
-    window_size=55,
-    short_window=5,
-    apply_smoothing=False,
-):
-    """
-    The 'Frozen' logic. Any external consumer (NLF, MoGe, or WHAM) 
-    can pass data here to get the 61-feature vector.
-    """
-    extractor = LMAExtractor(
-        window_size=window_size,
-        fps=fps,
-        short_window=short_window,
-        apply_smoothing=apply_smoothing,
-    )
-    lma_dict = extractor.extract_all_features(joints, volumes, floors)
-    
-    # Flatten to matrix
-    feature_keys = sorted(lma_dict.keys())
-    lma_matrix = np.stack([lma_dict[k] for k in feature_keys], axis=1)
-    
-    return lma_dict, lma_matrix
 
 def process_single_video(
     video_path,
