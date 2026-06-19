@@ -5,9 +5,8 @@ import argparse
 import cv2
 import os
 import glob
-from sklearn.linear_model import QuantileRegressor
 from scipy.spatial import ConvexHull
-from moge.model.v2 import MoGeModel
+from floor import MoGeFloorEstimator, FlatFloorEstimator, FloorEstimator  # noqa: F401
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -30,36 +29,9 @@ def stage_a_nlf_implementation(frame, model, device="cuda"):
     
     return pred['joints3d'], pred['vertices3d']
 
-def stage_b_floor_estimation(frame, model, device="cuda"):
-    # 2. Process Image
-    # Replaces: img = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
-    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    input_tensor = torch.tensor(img / 255, dtype=torch.float32, device=device).permute(2, 0, 1)
-    
-    # 3. Infer 3D Point Map
-    output = model.infer(input_tensor)
-    points = output["points"].cpu().numpy() # Metric scale (H, W, 3)
-    mask = output["mask"].cpu().numpy().astype(bool)
-    valid_points = points[mask]
-
-    target_count = 2000
-    if len(valid_points) > target_count:
-        step = len(valid_points) // target_count
-        # [::step] is deterministic. It picks the same pixels every time.
-        scene_cloud = valid_points[::step]
-    else:
-        scene_cloud = valid_points
-
-    # 4. Explicit Floor Fitting (Rejects the "lowest ankle" assumption)
-    # Project to XZ-plane (x: right, z: forward depth in OpenCV camera coords)
-    z = scene_cloud[:, 2].reshape(-1, 1)
-    y = scene_cloud[:, 1]
-
-    # Fit a line to the bottom 5% of points to handle tilt/slope
-    qr = QuantileRegressor(quantile=0.95, alpha=0, solver='highs')
-    qr.fit(z, y)
-
-    return qr, valid_points, scene_cloud
+# Floor estimation now lives in floor.py as the pluggable MoGeFloorEstimator (default)
+# / FlatFloorEstimator. process_single_video takes a `floor_estimator` so the depth model
+# can be overridden or skipped entirely. See floor.py.
 
 def verify_pipeline_integrity(all_joints, all_volumes, all_floor_models):
     """
@@ -250,12 +222,20 @@ def process_single_video(
     video_path,
     output_dir,
     nlf_model,
-    moge_model,
+    moge_model=None,
     device="cuda",
     viz=False,
     short_window=5,
     apply_smoothing=False,
+    floor_estimator=None,
 ):
+    # Floor estimation is pluggable. Default: MoGe (the dance paper's depth-based floor).
+    # Pass floor_estimator=FlatFloorEstimator() for ground-aligned joints (no depth model),
+    # or any object with estimate(frame) -> floor_model. moge_model (a preloaded MoGe) is
+    # kept for backwards compatibility and is wrapped here when no estimator is given.
+    if floor_estimator is None:
+        floor_estimator = MoGeFloorEstimator(model=moge_model, device=device)
+
     # Create dynamic filenames based on the specific video name
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     print(f"\nProcessing: {base_name}")
@@ -296,9 +276,9 @@ def process_single_video(
                 if not ret:
                     break
                 
-                # --- STAGE B: Floor Estimation ---
+                # --- STAGE B: Floor Estimation (pluggable; default = MoGe) ---
                 if frame_idx == 0:
-                    current_floor_model, _, scene_cloud = stage_b_floor_estimation(frame, moge_model, device)
+                    current_floor_model = floor_estimator.estimate(frame)
 
                 # Keep frame-aligned floor models for downstream feature extraction.
                 all_floor_models.append(current_floor_model)
@@ -476,21 +456,23 @@ def main():
     # 3. LOAD MODELS (Once per process)
     print("Loading Models...")
     nlf_model = torch.jit.load('models/nlf_l_multi_0.3.2.torchscript').to(device).eval()
-    moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device)
+    # Default floor backend: MoGe (loads its checkpoint lazily on the first frame).
+    # Swap for FlatFloorEstimator() if your joints are already ground-aligned.
+    floor_estimator = MoGeFloorEstimator(device=device)
 
     # 4. RUN SEQUENTIALLY
     # (If run by external MP script, this list will just contain 1 item)
     for video_path in video_files:
         try:
             process_single_video(
-                video_path, 
-                args.output_dir, 
-                nlf_model, 
-                moge_model, 
-                device, 
+                video_path,
+                args.output_dir,
+                nlf_model,
+                device=device,
                 viz=args.viz,
                 short_window=short_window,
                 apply_smoothing=apply_smoothing,
+                floor_estimator=floor_estimator,
             )
         except Exception as e:
             print(f"Failed on {video_path}: {e}")
